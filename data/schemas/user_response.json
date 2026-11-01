@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api-test.example.com/schemas/user_response.json",
+  "title": "电商用户接口响应契约",
+  "description": "适用于用户登录、新增、查询、修改、删除等接口的基础响应结构校验",
+
+  "type": "object",
+
+  "required": ["msg", "msg_code"],
+
+  "properties": {
+    "msg": {
+      "type": "string",
+      "description": "业务提示信息",
+      "minLength": 1,
+      "maxLength": 200
+    },
+
+    "msg_code": {
+      "type": "integer",
+      "description": "业务状态码（200 表示成功）",
+      "enum": [200]
+    },
+
+    "error_code": {
+      "type": ["integer", "string", "null"],
+      "description": "错误码（成功时可能为 null 或具体错误码）"
+    },
+
+    "token": {
+      "type": ["integer", "string"],
+      "description": "登录成功后返回的 Token（整数或字符串，用于后续接口鉴权）"
+    },
+
+    "data": {
+      "description": "用户详细信息（部分查询类接口返回）",
+      "oneOf": [
+        { "$ref": "#/$defs/UserDetail" },
+        { "type": "null" }
+      ]
+    },
+
+    "userId": {
+      "type": ["integer", "string"],
+      "description": "用户 ID（部分接口直接在顶层返回）"
+    },
+
+    "user_id": {
+      "type": ["integer", "string"],
+      "description": "用户 ID（兼容后端字段命名不一致的情况）"
+    },
+
+    "username": {
+      "type": "string",
+      "description": "用户名（部分接口直接在顶层返回）"
+    },
+
+    "phone": {
+      "type": ["integer", "string"],
+      "description": "手机号（后端可能返回 int 或 string）"
+    }
+  },
+
+  "additionalProperties": true,
+
+  "$defs": {
+    "UserDetail": {
+      "type": "object",
+      "description": "用户详细信息（查询用户接口返回的结构）",
+      "properties": {
+        "id": {
+          "type": ["integer", "string"],
+          "description": "用户 ID"
+        },
+        "username": {
+          "type": "string",
+          "description": "用户名",
+          "minLength": 2,
+          "maxLength": 50
+        },
+        "phone": {
+          "type": ["integer", "string"],
+          "description": "手机号"
+        },
+        "role_id": {
+          "type": ["integer", "string"],
+          "description": "角色 ID"
+        },
+        "dates": {
+          "type": "string",
+          "description": "有效期（YYYY-MM-DD 格式）",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "status": {
+          "type": ["integer", "string"],
+          "description": "用户状态（如 0-禁用，1-正常）",
+          "enum": [0, 1, "0", "1"]
+        },
+        "createTime": {
+          "type": "string",
+          "description": "创建时间",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

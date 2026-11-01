@@ -1,0 +1,331 @@
+// ============================================================
+//  Jenkinsfile.inspection
+//  用途：生产环境高频只读巡检（每小时一次）
+//  特性：
+//    - 强制只读（禁止 POST/PUT/DELETE 写操作）
+//    - 极短耗时（< 2 分钟）
+//    - 失败立即邮件告警
+//    - 不生成完整 Allure 报告（保留截图/摘要）
+//    - 支持与 daily 流水线错开运行
+// ============================================================
+
+pipeline {
+    agent none
+
+    // ---------- 参数 ----------
+    parameters {
+        choice(
+            name: 'ENV',
+            choices: ['prod', 'uat'],   // 巡检优先 prod，可切 uat 验证
+            description: '巡检环境（默认 prod，仅读操作）'
+        )
+        choice(
+            name: 'SCOPE',
+            choices: ['health', 'core', 'all'],
+            description: '巡检范围：health=仅健康检查；core=核心只读链路；all=health+core'
+        )
+        booleanParam(
+            name: 'SEND_EMAIL',
+            defaultValue: true,
+            description: '是否发送邮件（建议开启，用于告警）'
+        )
+        booleanParam(
+            name: 'SEND_EMAIL_ON_SUCCESS',
+            defaultValue: false,
+            description: '成功时是否也发邮件（默认关闭，仅失败告警）'
+        )
+    }
+
+    // ---------- 环境变量 ----------
+    environment {
+        REPORT_DIR      = "reports/allure-results-inspection"
+        ARTIFACT_DIR    = "reports/artifacts"
+        LOG_DIR         = "reports/logs"
+        DOCKER_IMAGE    = "api-test-runner:latest"
+
+        MAIL_TO         = "18507113868@163.com"
+        MAIL_FROM       = "jenkins-noreply@yourcompany.com"
+
+        // 生产只读账号凭证（必须单独申请，只有读权限）
+        PROD_READONLY_USER = credentials('api-test-prod-readonly-user')
+        PROD_READONLY_PWD  = credentials('api-test-prod-readonly-password')
+
+        // 强制只读开关（框架引擎会读取该变量）
+        API_TEST_READONLY = "true"
+    }
+
+    // ---------- 选项 ----------
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '10'))
+        timeout(time: 10, unit: 'MINUTES')     // 巡检最大 10 分钟，超时直接失败
+        disableConcurrentBuilds()
+    }
+
+    // ---------- 触发器：每小时一次 ----------
+    triggers {
+        // 每小时 10 分执行（避开整点，与 daily 的 6:00 错开）
+        cron('H/30 * * * *')
+        // 如需更密集，可改为：cron('H/15 * * * *')
+    }
+
+    stages {
+
+        // ============ Stage 1: 准备 ============
+        stage('Prepare') {
+            agent any
+            steps {
+                checkout scm
+                sh """
+                    mkdir -p ${REPORT_DIR} ${ARTIFACT_DIR} ${LOG_DIR}
+                """
+                script {
+                    // 记录巡检元数据
+                    def meta = """
+                    {
+                      "build_number": "${env.BUILD_NUMBER}",
+                      "env": "${params.ENV}",
+                      "scope": "${params.SCOPE}",
+                      "readonly": true,
+                      "triggered_by": "${currentBuild.getBuildCauses()[0].shortDescription}",
+                      "start_time": "${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                    }
+                    """
+                    writeFile file: "${ARTIFACT_DIR}/inspection-metadata.json", text: meta
+                }
+            }
+        }
+
+        // ============ Stage 2: 生产安全卫士自检 ============
+        stage('Safety Guard Check') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    // 二次校验：确保 readonly 标志已开启
+                    if (env.API_TEST_READONLY != "true") {
+                        error("❌ 生产巡检必须开启 API_TEST_READONLY=true")
+                    }
+
+                    // 校验框架的 EnvGuard 在 prod 环境下会拦截写操作
+                    sh """
+                        python -c "
+import sys
+sys.path.insert(0, '.')
+from core.engine.env_guard import EnvGuard
+guard = EnvGuard(env='${params.ENV}')
+assert guard.is_readonly(), 'EnvGuard 未启用只读模式'
+print('[OK] EnvGuard 已启用只读模式，写操作将被拦截')
+                        "
+                    """
+                }
+            }
+        }
+
+        // ============ Stage 3: 环境健康检查 ============
+        stage('Health Check') {
+            when {
+                expression { params.SCOPE == 'health' || params.SCOPE == 'all' }
+            }
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/health_check.py \
+                        --env=${params.ENV} \
+                        --readonly \
+                        --output=${ARTIFACT_DIR}/health-check.json
+                """
+            }
+        }
+
+        // ============ Stage 4: 核心只读链路巡检 ============
+        stage('Core Readonly Inspection') {
+            when {
+                expression { params.SCOPE == 'core' || params.SCOPE == 'all' }
+            }
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python run.py \
+                        --env=${params.ENV} \
+                        --module=all \
+                        --tag=health \
+                        --readonly \
+                        --workers=2 \
+                        --retry=0 \
+                        --timeout-per-case=10 \
+                        --timeout-total=120 \
+                        --report-dir=${REPORT_DIR}
+                """
+            }
+        }
+
+        // ============ Stage 5: 结果汇总 ============
+        stage('Summarize') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    // 生成巡检摘要（轻量，不做完整质量门禁）
+                    sh """
+                        python scripts/quality_gate.py \
+                            --report-dir=${REPORT_DIR} \
+                            --output=${ARTIFACT_DIR}/inspection-report.json \
+                            --mode=inspection
+                    """
+
+                    // 打印摘要到构建日志
+                    def report = readJSON file: "${ARTIFACT_DIR}/inspection-report.json"
+                    echo """
+                    ================= 巡检摘要 =================
+                    环境:   ${params.ENV}
+                    范围:   ${params.SCOPE}
+                    总数:   ${report.total ?: 0}
+                    通过:   ${report.passed ?: 0}
+                    失败:   ${report.failed ?: 0}
+                    通过率: ${report.pass_rate ?: 'N/A'}
+                    ============================================
+                    """
+
+                    // 失败用例立即标记 unstable（让邮件知道）
+                    if ((report.failed ?: 0) > 0) {
+                        unstable("巡检发现 ${report.failed} 个失败用例")
+                    }
+                }
+            }
+        }
+    }
+
+    // ============ 构建后处理 ============
+    post {
+        always {
+            // 只归档轻量产物，避免存储膨胀
+            archiveArtifacts allowEmptyArchive: true,
+                artifacts: """
+                    ${ARTIFACT_DIR}/inspection-metadata.json,
+                    ${ARTIFACT_DIR}/inspection-report.json,
+                    ${ARTIFACT_DIR}/health-check.json,
+                    ${LOG_DIR}/inspection-*.log
+                """,
+                fingerprint: false
+        }
+
+        // 失败或异常才发邮件（避免打扰）
+        unstable {
+            script {
+                if (params.SEND_EMAIL) {
+                    sendInspectionEmail('UNSTABLE')
+                }
+            }
+        }
+
+        failure {
+            script {
+                if (params.SEND_EMAIL) {
+                    sendInspectionEmail('FAILURE')
+                }
+            }
+        }
+
+        success {
+            script {
+                if (params.SEND_EMAIL && params.SEND_EMAIL_ON_SUCCESS) {
+                    sendInspectionEmail('SUCCESS')
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// 巡检邮件发送（精简版，突出异常）
+// ============================================================
+def sendInspectionEmail(String status) {
+    def color = status == 'SUCCESS' ? '#52c41a' :
+                status == 'UNSTABLE' ? '#faad14' : '#f5222d'
+
+    def report = [:]
+    try {
+        if (fileExists("reports/artifacts/inspection-report.json")) {
+            report = readJSON file: 'reports/artifacts/inspection-report.json'
+        }
+    } catch (Exception e) {
+        report = [:]
+    }
+
+    def failedCases = ''
+    if (report.failed_cases && report.failed_cases.size() > 0) {
+        failedCases = "<ul>"
+        report.failed_cases.take(5).each { case ->
+            failedCases += "<li><b>${case.name}</b>: ${case.message ?: '未知错误'}</li>"
+        }
+        failedCases += "</ul>"
+        if (report.failed_cases.size() > 5) {
+            failedCases += "<p>... 共 ${report.failed_cases.size()} 个失败用例，请查看构建日志</p>"
+        }
+    }
+
+    emailext(
+        to: "${MAIL_TO}",
+        from: "${MAIL_FROM}",
+        subject: "[${status}] 生产环境巡检告警 | 构建 #${env.BUILD_NUMBER} | ${new Date().format('MM-dd HH:mm')}",
+        mimeType: 'text/html',
+        body: """
+        <div style="font-family: 'Microsoft YaHei', Arial; max-width: 720px;">
+          <h2 style="color: ${color};">🚨 生产环境巡检 —— ${status}</h2>
+
+          <table border="1" cellspacing="0" cellpadding="8"
+                 style="border-collapse: collapse; width: 100%; border-color: #ddd;">
+            <tr style="background:#f5f5f5;">
+              <td><b>项目</b></td><td><b>值</b></td>
+            </tr>
+            <tr><td>构建号</td><td>#${env.BUILD_NUMBER}</td></tr>
+            <tr><td>环境</td><td>${params.ENV}</td></tr>
+            <tr><td>巡检范围</td><td>${params.SCOPE}</td></tr>
+            <tr><td>触发方式</td><td>${currentBuild.getBuildCauses()[0].shortDescription}</td></tr>
+            <tr><td>执行耗时</td><td>${currentBuild.durationString}</td></tr>
+            <tr><td>总数</td><td>${report.total ?: '-'}</td></tr>
+            <tr><td>通过</td><td style="color:#52c41a">${report.passed ?: '-'}</td></tr>
+            <tr><td>失败</td><td style="color:#f5222d">${report.failed ?: '-'}</td></tr>
+            <tr><td>通过率</td><td>${report.pass_rate ?: '-'}</td></tr>
+          </table>
+
+          ${failedCases ? "<h3>失败用例（Top5）</h3>" + failedCases : ''}
+
+          <p style="margin-top: 20px;">
+            <a href="${env.BUILD_URL}console"
+               style="display:inline-block;padding:10px 20px;background:#1890ff;
+                      color:#fff;text-decoration:none;border-radius:4px;">
+              🖥 查看构建日志
+            </a>
+          </p>
+
+          <p style="color:#999;font-size:12px;margin-top:30px;">
+            此邮件为生产巡检自动告警，请立即关注。
+          </p>
+        </div>
+        """
+    )
+}

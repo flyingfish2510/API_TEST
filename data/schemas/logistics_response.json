@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api-test.example.com/schemas/logistics_response.json",
+  "title": "物流项目通用响应契约",
+  "description": "适用于物流项目所有接口的基础响应结构校验",
+
+  "type": "object",
+  "required": ["code", "data", "message"],
+
+  "properties": {
+    "code": {
+      "type": "integer",
+      "description": "业务状态码（20000 表示成功）",
+      "enum": [20000]
+    },
+
+    "message": {
+      "type": "string",
+      "description": "返回的提示信息",
+      "minLength": 1,
+      "maxLength": 200
+    },
+
+    "data": {
+      "description": "业务数据（类型因接口而异，支持多种形态）",
+      "oneOf": [
+        { "$ref": "#/$defs/BooleanData" },
+        { "$ref": "#/$defs/PagedData" },
+        { "$ref": "#/$defs/ObjectData" },
+        { "$ref": "#/$defs/ArrayData" },
+        { "type": "null" }
+      ]
+    },
+
+    "orderNo": {
+      "type": "string",
+      "description": "物流订单号（部分下单接口直接返回）",
+      "pattern": "^DD\\d{17}$"
+    },
+
+    "logisticsStatus": {
+      "type": "string",
+      "description": "物流状态标识",
+      "enum": ["0", "1", "2", "3"]
+    },
+
+    "scheduleNo": {
+      "type": "string",
+      "description": "调度单号",
+      "pattern": "^DDU\\d{17}$"
+    },
+
+    "reconciliationNum": {
+      "type": "string",
+      "description": "对账单号",
+      "pattern": "^DZ\\d{29}$"
+    },
+
+    "translate_language": {
+      "type": "string",
+      "description": "多语言标识",
+      "enum": ["zh-CN", "en-US"]
+    }
+  },
+
+  "additionalProperties": false,
+
+  "$defs": {
+    "BooleanData": {
+      "type": "boolean",
+      "description": "部分操作类接口（如接单、拆分订单）的 data 为布尔值"
+    },
+
+    "ArrayData": {
+      "type": "array",
+      "description": "部分列表接口（如物料列表）的 data 为数组",
+      "items": {"type": "string"}
+    },
+
+    "ObjectData": {
+      "type": "object",
+      "description": "大部分详情/状态查询接口的 data 为对象",
+      "required": ["queryTime"],
+      "properties": {
+        "queryTime": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$",
+          "description": "查询时间"
+        },
+        "status": {
+          "type": "string",
+          "description": "业务状态（如订单状态、物流状态、库存状态）",
+          "enum": ["0", "1", "2", "3"]
+        },
+        "logisticsOrderNo": {
+          "type": "string",
+          "description": "物流单号（如 W20230713...）"
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "PagedData": {
+      "type": "object",
+      "description": "分页查询类接口（如调度单列表、承运商列表）的 data 结构",
+      "required": ["current", "pages", "records"],
+      "properties": {
+        "current": {
+          "type": ["integer", "string"],
+          "description": "当前页码"
+        },
+        "pages": {
+          "type": ["integer", "string"],
+          "description": "总页数"
+        },
+        "records": {
+          "type": "array",
+          "description": "数据记录列表",
+          "items": {"$ref": "#/$defs/PagedRecord"}
+        },
+        "total": {
+          "type": "integer",
+          "description": "总记录数"
+        },
+        "size": {
+          "type": "integer",
+          "description": "每页大小"
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "PagedRecord": {
+      "type": "object",
+      "description": "分页记录中的单条数据结构",
+      "properties": {
+        "logisticsOrderNo": {"type": "string"},
+        "orderNo": {"type": "string"},
+        "carrierName": {"type": "string"},
+        "driverName": {"type": "string"},
+        "vehicleNo": {"type": "string"},
+        "freightPrice": {"type": ["number", "null"]},
+        "createTime": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

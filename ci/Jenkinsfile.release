@@ -1,0 +1,558 @@
+// ============================================================
+//  Jenkinsfile.release
+//  用途：发版前置全量回归门禁（手动触发）
+//  特性：
+//    - 手动触发，参数化配置目标版本
+//    - 强制全量执行 P0 + P1 用例
+//    - 双重门禁（通过率 + 失败数）
+//    - 生成发版质量报告（含版本号、Commit、环境快照）
+//    - 结果邮件全量通知（含项目负责人）
+//    - 支持回滚场景的对比校验
+// ============================================================
+
+pipeline {
+    agent none
+
+    // ---------- 参数 ----------
+    parameters {
+        string(
+            name: 'RELEASE_VERSION',
+            defaultValue: '',
+            description: '发版版本号（例如 v1.2.0），必填'
+        )
+        choice(
+            name: 'ENV',
+            choices: ['uat', 'staging'],
+            description: '目标执行环境（不可选 prod，prod 由发布流程管控）'
+        )
+        string(
+            name: 'TARGET_COMMIT',
+            defaultValue: '',
+            description: '目标 Commit Hash（留空则使用当前 HEAD）'
+        )
+        string(
+            name: 'WORKERS',
+            defaultValue: '4',
+            description: '并行进程数'
+        )
+        booleanParam(
+            name: 'SEND_EMAIL',
+            defaultValue: true,
+            description: '是否发送邮件通知'
+        )
+        booleanParam(
+            name: 'FORCE_PASS_ON_WARN',
+            defaultValue: false,
+            description: 'P1 用例允许警告（默认禁止，严格模式）'
+        )
+    }
+
+    // ---------- 环境变量 ----------
+    environment {
+        REPORT_DIR      = "reports/allure-results-release"
+        JUNIT_DIR       = "reports/junit"
+        ARTIFACT_DIR    = "reports/artifacts"
+        LOG_DIR         = "reports/logs"
+        DOCKER_IMAGE    = "api-test-runner:latest"
+
+        MAIL_TO         = "18507113868@163.com"
+        MAIL_FROM       = "jenkins-noreply@yourcompany.com"
+    }
+
+    // ---------- 选项 ----------
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    // 发版门禁为手动触发，不需要定时触发器
+
+    stages {
+
+        // ============ Stage 0: 参数校验 ============
+        stage('Validate Inputs') {
+            agent any
+            steps {
+                script {
+                    // 版本号必填
+                    if (!params.RELEASE_VERSION?.trim()) {
+                        error("❌ 必须填写 RELEASE_VERSION 参数")
+                    }
+
+                    // 版本号格式校验
+                    if (!(params.RELEASE_VERSION ==~ /^v\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/)) {
+                        error("❌ RELEASE_VERSION 格式不合法，应为 v1.2.0 或 v1.2.0-beta.1")
+                    }
+
+                    // 环境限制
+                    if (params.ENV == 'prod') {
+                        error("❌ 发版门禁不允许直接跑生产环境，请使用 uat 或 staging")
+                    }
+
+                    echo "[OK] 参数校验通过：版本=${params.RELEASE_VERSION}，环境=${params.ENV}"
+                }
+            }
+        }
+
+        // ============ Stage 1: Checkout ============
+        stage('Checkout') {
+            agent any
+            steps {
+                checkout scm
+
+                script {
+                    // 如果指定了 target commit，切换到该 commit 执行
+                    if (params.TARGET_COMMIT?.trim()) {
+                        sh "git checkout ${params.TARGET_COMMIT}"
+                        echo "[INFO] 已切换到 TARGET_COMMIT: ${params.TARGET_COMMIT}"
+                    }
+
+                    def commitHash = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    def branch     = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+
+                    // 防止同一版本重复放行（若归档目录已有同版本成功记录）
+                    def archiveFile = "reports/artifacts/release-${params.RELEASE_VERSION}-${params.ENV}.json"
+                    writeFile file: '.release_info', text: """
+                    {
+                      "version": "${params.RELEASE_VERSION}",
+                      "env": "${params.ENV}",
+                      "commit": "${commitHash}",
+                      "branch": "${branch}",
+                      "build_number": "${env.BUILD_NUMBER}",
+                      "triggered_by": "${currentBuild.getBuildCauses()[0].shortDescription}",
+                      "start_time": "${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                    }
+                    """
+
+                    echo "[INFO] Release 版本: ${params.RELEASE_VERSION}, Commit: ${commitHash}"
+                }
+
+                sh 'mkdir -p reports reports/logs reports/junit reports/artifacts ' + REPORT_DIR
+                // 恢复上一成功构建的 Allure history，保证趋势图跨构建累积
+                restoreAllureHistory()
+            }
+        }
+
+        // ============ Stage 2: 环境快照 ============
+        stage('Environment Snapshot') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/health_check.py \
+                        --env=${params.ENV} \
+                        --snapshot \
+                        --output=${ARTIFACT_DIR}/env-snapshot.json
+                """
+            }
+        }
+
+        // ============ Stage 3: 构建镜像 ============
+        stage('Build Docker Image') {
+            agent any
+            steps {
+                sh """
+                    docker build \
+                        -f docker/Dockerfile \
+                        -t ${DOCKER_IMAGE}-release \
+                        .
+                """
+            }
+        }
+
+        // ============ Stage 4: Dry Run ============
+        stage('Dry Run') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}-release"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/dry_run.py \
+                        --env=${params.ENV} \
+                        --module=all \
+                        --require-p0-coverage
+                """
+            }
+        }
+
+        // ============ Stage 5: 执行全量回归（P0 + P1）============
+        stage('Run Full Regression') {
+            parallel {
+
+                stage('Ecommerce P0') {
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}-release"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=ecommerce \
+                                --tag=p0 \
+                                --workers=${params.WORKERS} \
+                                --retry=1 \
+                                --timeout-per-case=60 \
+                                --report-dir=${REPORT_DIR}-ecommerce-p0 \
+                                --junit-dir=${JUNIT_DIR}/ecommerce-p0
+                        """
+                    }
+                }
+
+                stage('Ecommerce P1') {
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}-release"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=ecommerce \
+                                --tag=p1 \
+                                --workers=${params.WORKERS} \
+                                --retry=1 \
+                                --timeout-per-case=60 \
+                                --report-dir=${REPORT_DIR}-ecommerce-p1 \
+                                --junit-dir=${JUNIT_DIR}/ecommerce-p1
+                        """
+                    }
+                }
+
+                stage('Logistics P0') {
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}-release"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=logistics \
+                                --tag=p0 \
+                                --workers=${params.WORKERS} \
+                                --retry=1 \
+                                --timeout-per-case=60 \
+                                --report-dir=${REPORT_DIR}-logistics-p0 \
+                                --junit-dir=${JUNIT_DIR}/logistics-p0
+                        """
+                    }
+                }
+
+                stage('Logistics P1') {
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}-release"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=logistics \
+                                --tag=p1 \
+                                --workers=${params.WORKERS} \
+                                --retry=1 \
+                                --timeout-per-case=60 \
+                                --report-dir=${REPORT_DIR}-logistics-p1 \
+                                --junit-dir=${JUNIT_DIR}/logistics-p1
+                        """
+                    }
+                }
+            }
+        }
+
+        // ============ Stage 6: 合并报告 ============
+        stage('Merge Reports') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}-release"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    mkdir -p ${REPORT_DIR}
+                    for dir in ${REPORT_DIR}-*; do
+                        if [ -d "\$dir" ]; then
+                            cp -r "\$dir"/* ${REPORT_DIR}/ || true
+                        fi
+                    done
+                """
+            }
+        }
+
+        // ============ Stage 7: 双重门禁判定 ============
+        stage('Release Gate') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}-release"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    sh """
+                        python scripts/quality_gate.py \
+                            --report-dir=${REPORT_DIR} \
+                            --output=${ARTIFACT_DIR}/release-report.json \
+                            --mode=release \
+                            --version=${params.RELEASE_VERSION}
+                    """
+
+                    def report = readJSON file: "${ARTIFACT_DIR}/release-report.json"
+
+                    // ---- 门禁1：P0 必须 100% 通过 ----
+                    if ((report.p0_failed ?: 0) > 0) {
+                        error("❌ 发版门禁失败：${report.p0_failed} 个 P0 用例失败（P0 必须 100% 通过）")
+                    }
+
+                    // ---- 门禁2：P1 通过率 ----
+                    def p1PassRate = report.p1_pass_rate_value ?: 100
+                    if (params.FORCE_PASS_ON_WARN) {
+                        // 允许警告模式
+                        if (p1PassRate < 90) {
+                            error("❌ 发版门禁失败：P1 通过率 ${p1PassRate}% 低于 90%")
+                        } else if (p1PassRate < 100) {
+                            unstable("⚠️ P1 存在失败但允许放行（${p1PassRate}%）")
+                        }
+                    } else {
+                        // 严格模式
+                        if ((report.p1_failed ?: 0) > 0) {
+                            error("❌ 发版门禁失败：${report.p1_failed} 个 P1 用例失败（严格模式禁止 P1 失败）")
+                        }
+                    }
+
+                    // ---- 门禁3：整体通过率 ----
+                    def overallRate = report.pass_rate_value ?: 0
+                    if (overallRate < 98) {
+                        error("❌ 发版门禁失败：整体通过率 ${overallRate}% 低于 98%")
+                    }
+
+                    // ---- 门禁4：无新增失败用例（与上一次 release 对比）----
+                    sh """
+                        python scripts/baseline_compare.py \
+                            --current=${ARTIFACT_DIR}/release-report.json \
+                            --baseline-dir=${ARTIFACT_DIR} \
+                            --output=${ARTIFACT_DIR}/release-diff.json || true
+                    """
+                    if (fileExists("${ARTIFACT_DIR}/release-diff.json")) {
+                        def diff = readJSON file: "${ARTIFACT_DIR}/release-diff.json"
+                        if ((diff.new_failures ?: 0) > 0) {
+                            error("❌ 发版门禁失败：存在 ${diff.new_failures} 个新增失败用例，禁止放行")
+                        }
+                    }
+
+                    echo """
+                    =============== 发版门禁通过 ===============
+                    版本:   ${params.RELEASE_VERSION}
+                    环境:   ${params.ENV}
+                    P0 用例: ${report.p0_total ?: 0} 个，全部通过
+                    P1 用例: ${report.p1_total ?: 0} 个，通过率 ${report.p1_pass_rate ?: '100%'}
+                    整体:   ${report.total ?: 0} 个，通过率 ${report.pass_rate ?: '100%'}
+                    ============================================
+                    """
+
+                    // 存档发版记录
+                    writeFile file: "${ARTIFACT_DIR}/release-${params.RELEASE_VERSION}-${params.ENV}.json", text: """
+                    {
+                      "version": "${params.RELEASE_VERSION}",
+                      "env": "${params.ENV}",
+                      "commit": "${sh(script: 'git rev-parse HEAD', returnStdout: true).trim()}",
+                      "build_number": "${env.BUILD_NUMBER}",
+                      "result": "PASSED",
+                      "timestamp": "${new Date().format('yyyy-MM-dd HH:mm:ss')}",
+                      "report": ${groovy.json.JsonOutput.toJson(report)}
+                    }
+                    """
+                }
+            }
+        }
+    }
+
+    // ============ 构建后处理 ============
+    post {
+        always {
+            // 1. JUnit
+            junit allowEmptyResults: true, testResults: "${JUNIT_DIR}/**/*.xml"
+
+            // 2. Allure
+            script {
+                if (fileExists(REPORT_DIR)) {
+                    allure([
+                        includeProperties: false,
+                        jdk: '',
+                        commandline: 'allure',
+                        properties: [],
+                        reportBuildPolicy: 'ALWAYS',
+                        results: [[path: REPORT_DIR]]
+                    ])
+                }
+            }
+
+            // 3. 归档全部产物（发版留档要求最全）
+            archiveArtifacts allowEmptyArchive: true,
+                artifacts: """
+                    ${ARTIFACT_DIR}/release-report.json,
+                    ${ARTIFACT_DIR}/env-snapshot.json,
+                    ${ARTIFACT_DIR}/release-diff.json,
+                    ${ARTIFACT_DIR}/release-*.json,
+                    ${JUNIT_DIR}/**,
+                    ${LOG_DIR}/**,
+                    reports/allure-report/**,
+                    reports/allure-report/history/**
+                """,
+                fingerprint: true
+
+            // 4. 清理分片
+            sh 'rm -rf reports/allure-results-release-* || true'
+        }
+
+        success {
+            script {
+                if (params.SEND_EMAIL) {
+                    sendReleaseEmail('SUCCESS')
+                }
+            }
+        }
+
+        unstable {
+            script {
+                if (params.SEND_EMAIL) {
+                    sendReleaseEmail('UNSTABLE')
+                }
+            }
+        }
+
+        failure {
+            script {
+                if (params.SEND_EMAIL) {
+                    sendReleaseEmail('FAILURE')
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// 发版邮件通知（完整版本信息）
+// ============================================================
+def sendReleaseEmail(String status) {
+    def color = status == 'SUCCESS' ? '#52c41a' :
+                status == 'UNSTABLE' ? '#faad14' : '#f5222d'
+
+    def icon = status == 'SUCCESS' ? '✅' :
+               status == 'UNSTABLE' ? '⚠️' : '❌'
+
+    def report = [:]
+    try {
+        if (fileExists("reports/artifacts/release-report.json")) {
+            report = readJSON file: 'reports/artifacts/release-report.json'
+        }
+    } catch (Exception e) { }
+
+    def failedCases = ''
+    if (report.failed_cases && report.failed_cases.size() > 0) {
+        failedCases = "<h3>失败用例</h3><ul>"
+        report.failed_cases.take(10).each { c ->
+            failedCases += "<li><b>[${c.priority ?: 'P?'}] ${c.name}</b>: ${c.message ?: ''}</li>"
+        }
+        failedCases += "</ul>"
+    }
+
+    emailext(
+        to: "${MAIL_TO}",
+        from: "${MAIL_FROM}",
+        subject: "${icon} [${status}] 发版门禁 | ${params.RELEASE_VERSION} | ${params.ENV} | 构建 #${env.BUILD_NUMBER}",
+        mimeType: 'text/html',
+        body: """
+        <div style="font-family:'Microsoft YaHei', Arial; max-width:760px;">
+          <h2 style="color:${color};">${icon} 发版前置门禁 —— ${status}</h2>
+          <p>版本 <b>${params.RELEASE_VERSION}</b> 在环境 <b>${params.ENV}</b> 的发版门禁结果：</p>
+
+          <table border="1" cellspacing="0" cellpadding="8"
+                 style="border-collapse:collapse;width:100%;border-color:#ddd;">
+            <tr style="background:#f5f5f5;"><td><b>项目</b></td><td><b>值</b></td></tr>
+            <tr><td>版本号</td><td>${params.RELEASE_VERSION}</td></tr>
+            <tr><td>目标环境</td><td>${params.ENV}</td></tr>
+            <tr><td>构建号</td><td>#${env.BUILD_NUMBER}</td></tr>
+            <tr><td>触发方式</td><td>${currentBuild.getBuildCauses()[0].shortDescription}</td></tr>
+            <tr><td>执行耗时</td><td>${currentBuild.durationString}</td></tr>
+            <tr><td>P0 用例</td><td>${report.p0_total ?: '-'}（失败 ${report.p0_failed ?: 0}）</td></tr>
+            <tr><td>P1 用例</td><td>${report.p1_total ?: '-'}（失败 ${report.p1_failed ?: 0}）</td></tr>
+            <tr><td>整体通过率</td><td>${report.pass_rate ?: '-'}</td></tr>
+            <tr><td>新增失败</td><td>${report.new_failures ?: 0}</td></tr>
+          </table>
+
+          ${failedCases}
+
+          <p style="margin-top:20px;">
+            <a href="${env.BUILD_URL}allure"
+               style="padding:10px 20px;background:#1890ff;color:#fff;
+                      text-decoration:none;border-radius:4px;">
+              📊 查看 Allure 报告
+            </a>
+            <a href="${env.BUILD_URL}console"
+               style="padding:10px 20px;margin-left:10px;background:#595959;color:#fff;
+                      text-decoration:none;border-radius:4px;">
+              🖥 查看构建日志
+            </a>
+          </p>
+
+          <p style="color:#999;font-size:12px;margin-top:30px;">
+            此邮件为发版前置门禁自动发送，请保留作为发版审计存档。
+          </p>
+        </div>
+        """
+    )
+}
+
+// ============================================================
+// Allure 历史趋势：从上一成功构建恢复 history
+// ------------------------------------------------------------
+// Jenkins Allure 插件依据 allure-results/history 叠加趋势。
+// 干净 agent / Docker 环境下工作区不持久，故每次构建前从上一
+// 成功构建的归档产物中恢复该目录。
+// ============================================================
+def restoreAllureHistory() {
+    try {
+        copyArtifacts(
+            projectName: env.JOB_NAME,
+            selector: lastSuccessful(),
+            filter: 'reports/allure-report/history/**',
+            target: 'reports/allure-results-release/history-tmp',
+            flatten: true,
+            optional: true
+        )
+        // 拷贝到插件读取历史的位置：allure-results/history
+        sh "mkdir -p reports/allure-results-release/history && cp -r reports/allure-results-release/history-tmp/* reports/allure-results-release/history/ || true"
+        echo "[INFO] 已恢复上一次成功构建的 Allure history（若存在）"
+    } catch (Exception e) {
+        echo "[WARN] 恢复 Allure history 失败（首次构建可忽略）: ${e.message}"
+    }
+}
+

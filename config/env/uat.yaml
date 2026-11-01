@@ -1,0 +1,151 @@
+# ============================================================
+# config/env/uat.yaml
+# 预发布 / 用户验收测试（UAT）环境配置
+#
+# 使用场景：生产上线前的最终验证、业务人员 UAT 验收
+# 执行命令：python run.py --env=uat --tag=regression
+# 特性：配置逼近生产（HTTPS、SSL校验），但允许完整读写
+# ============================================================
+
+# ---------- 环境元信息 ----------
+env_name: uat
+description: "预发布（UAT）环境（配置逼近生产，允许业务验证）"
+
+# ---------- API 基础配置 ----------
+api:
+  # 预发布通常使用与生产相同的域名体系，仅前缀不同
+  base_url: "https://uat-api.yourcompany.com"
+  timeout: 15
+  verify_ssl: true                         # UAT 必须校验 SSL（模拟生产）
+  retry_times: 1                           # 网络重试 1 次
+  read_only: false                         # 允许读写，供完整业务验证
+
+# ---------- 数据库配置 ----------
+# 预发布环境连独立的 UAT 库（数据与生产隔离）
+database:
+  enabled: true
+  host: "uat-db.example.com"
+  port: 3306
+  user: "__FROM_CREDENTIALS__"              # Jenkins Credentials 注入
+  password: "__FROM_CREDENTIALS__"
+  db_name: "ecommerce_uat"
+  charset: "utf8mb4"
+  pool_size: 10
+  echo: false
+  read_only: false
+
+# ---------- Redis 配置 ----------
+redis:
+  enabled: true
+  host: "uat-redis.example.com"
+  port: 6379
+  db: 0
+  password: ""                              # 如有密码则填写
+
+# ---------- 账号体系 ----------
+# UAT 环境使用专门的验收账号，绝不与生产或测试共用
+accounts:
+  admin:
+    username: "uat_admin"
+    password: "__FROM_CREDENTIALS__"
+
+  user:
+    username: "uat_user01"
+    password: "__FROM_CREDENTIALS__"
+
+  logistics:
+    username: "uat_logistics"
+    password: "__FROM_CREDENTIALS__"
+
+  shipper:
+    username: "uat_shipper"
+    password: "__FROM_CREDENTIALS__"
+
+  group_admin:
+    username: "uat_group_admin"
+    password: "__FROM_CREDENTIALS__"
+
+  carrier:
+    username: "uat_carrier"
+    password: "__FROM_CREDENTIALS__"
+
+# ---------- 认证接口配置 ----------
+auth:
+  ecommerce_login:
+    url: "/dar/user/login"                                  # 对齐接口文档
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    token_jsonpath: "$.token"
+    expire_seconds: 7200                                    # UAT 会话通常更长
+
+  logistics_login:
+    url: "/api/user/login"
+    content_type: "application/json"
+    cookie_jsonpath: ""
+    expire_seconds: 3600
+
+# ---------- 执行策略 ----------
+execution:
+  workers: 4                               # 与 test 一致，加速验证
+  retry: 1
+  timeout_per_case: 60
+  timeout_total: 2400                      # UAT 允许 40 分钟（链路更复杂）
+  stop_on_first_failure: false
+
+# ---------- 日志配置 ----------
+logging:
+  level: "INFO"
+  format: "{time} | {level} | {extra[trace_id]} | {message}"
+  file: "reports/logs/uat.log"
+  console: true
+  rotation: "20 MB"
+  retention: "30 days"                     # UAT 日志保留更久，便于回溯
+
+# ---------- 安全开关 ----------
+safety:
+  is_production: false                     # UAT 非生产，但仍需谨慎
+  allow_write_operations: true
+  # UAT 环境虽然允许写，但明确列出高危接口，方便审计
+  high_risk_urls:
+    - "/char/user/deleteUser"
+    - "/coupApply/cms/orderPay"
+    - "/api/order/pc/cost/receiveCost/create/bill"
+  # 高危接口执行时打印审计日志
+  audit_log_for_high_risk: true
+
+# ---------- Mock 服务 ----------
+mock:
+  enabled: false                           # UAT 尽量真实
+  port: 8788
+  rules_dir: "data/mocks"
+
+# ---------- 快照对比 ----------
+snapshot:
+  enabled: true
+  snapshot_dir: "data/snapshots"
+  default_mode: "loose"
+  auto_save_on_first_run: false            # UAT 不自动建基线，需人工确认
+
+# ---------- 数据清理 ----------
+cleanup:
+  enabled: true
+  strategy: "reverse_order"
+  ignore_errors: true
+  report_file: "reports/artifacts/cleanup-uat.json"
+
+# ---------- 告警配置 ----------
+alert:
+  enabled: true
+  on_failure: true
+  on_unstable: true
+  on_success: true                         # UAT 验证结果重要，成功也通知
+  channels:
+    email:
+      enabled: true
+      to:
+        - "18507113868@163.com"
+        - "qa-lead@yourcompany.com"
+        - "product-owner@yourcompany.com"
+      subject_prefix: "[API_TEST-UAT]"
+    dingtalk:
+      enabled: true
+      webhook: "__FROM_CREDENTIALS__"      # UAT 结果需同步到项目群

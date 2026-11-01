@@ -1,0 +1,136 @@
+# ============================================================
+# config/env/test.yaml
+# 测试环境配置（本地 flaskServer 联调 / CI 回归）
+# ============================================================
+
+# ---------- 环境元信息 ----------
+env_name: test
+description: "测试环境（flaskServer 本地服务 / CI 回归）"
+
+# ---------- API 基础配置 ----------
+api:
+  base_url: "http://127.0.0.1:8787"
+  timeout: 15
+  verify_ssl: false
+  retry_times: 2
+  read_only: false
+
+# ---------- 数据库配置 ----------
+# 由于当前本地环境没有真实 MySQL，先禁用；如需 db_assert 请改为 true 并填真实信息
+database:
+  enabled: false
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: ""
+  db_name: "ecommerce_test"
+  charset: "utf8mb4"
+  pool_size: 10
+  echo: false
+
+# ---------- Redis 配置 ----------
+redis:
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  password: ""
+
+# ---------- 账号体系 ----------
+accounts:
+  admin:
+    username: "test01"
+    password: "admin123"
+
+  user:
+    username: "test02"
+    password: "user123"
+
+  logistics:
+    username: "logistics_test"
+    password: "admin123"
+
+  shipper:
+    username: "shipper_test"
+    password: "shipper123"
+
+  group_admin:
+    username: "group_test"
+    password: "group123"
+
+  carrier:
+    username: "carrier_test"
+    password: "carrier123"
+
+# ---------- 认证接口配置 ----------
+auth:
+  ecommerce_login:
+    url: "/dar/user/login"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    token_jsonpath: "$.token"
+    expire_seconds: 3600
+
+  logistics_login:
+    url: "/api/user/login"
+    content_type: "application/json"
+    cookie_jsonpath: ""
+    expire_seconds: 1800
+
+# ---------- 执行策略 ----------
+execution:
+  workers: 1
+  retry: 0
+  timeout_per_case: 60
+  timeout_total: 1800
+  stop_on_first_failure: false
+
+# ---------- 日志配置 ----------
+logging:
+  level: "INFO"
+  format: "{time} | {level} | {extra[trace_id]} | {message}"
+  file: "reports/logs/test.log"
+  console: true
+  rotation: "10 MB"
+  retention: "7 days"
+
+# ---------- 安全开关 ----------
+safety:
+  is_production: false
+  allow_write_operations: true
+  forbidden_methods: []
+  forbidden_urls: []
+
+# ---------- Mock 服务 ----------
+mock:
+  enabled: false
+  port: 8788
+  rules_dir: "data/mocks"
+
+# ---------- 快照对比 ----------
+snapshot:
+  enabled: false
+  snapshot_dir: "data/snapshots"
+  default_mode: "loose"
+  auto_save_on_first_run: true
+
+# ---------- 数据清理 ----------
+cleanup:
+  enabled: false
+  strategy: "reverse_order"
+  ignore_errors: true
+  report_file: "reports/artifacts/cleanup-report.json"
+
+# ---------- 告警配置 ----------
+alert:
+  enabled: false
+  on_failure: true
+  on_unstable: true
+  on_success: false
+  channels:
+    email:
+      enabled: false
+      to: "18507113868@163.com"
+      subject_prefix: "[API_TEST-TEST]"
+    dingtalk:
+      enabled: false
+      webhook: ""

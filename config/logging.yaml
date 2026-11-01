@@ -1,0 +1,123 @@
+# ============================================================
+# config/logging.yaml
+# 全局日志配置（适配 Loguru）
+#
+# 说明：
+#   1. 该配置由 common/logger/logger_manager.py 加载
+#   2. 环境级配置（如 local.yaml 中的 logging.level）优先级更高
+#   3. 支持控制台、文件双输出
+# ============================================================
+
+# ---------- 全局默认级别 ----------
+# 可选值: TRACE / DEBUG / INFO / SUCCESS / WARNING / ERROR / CRITICAL
+level: "INFO"
+
+# ---------- 日志格式模板 ----------
+# 支持 Loguru 的占位符：
+#   {time}         时间
+#   {level}        级别
+#   {extra[trace_id]}  Trace-ID（前 8 位）
+#   {name}         模块名
+#   {function}     函数名
+#   {line}         行号
+#   {message}      日志内容
+formats:
+  # 控制台格式：颜色高亮 + 简洁
+  console: "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{extra[trace_id]: <8}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
+
+  # 文件格式：完整字段 + 无颜色
+  file: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[trace_id]: <8} | {name}:{function}:{line} - {message}"
+
+# ---------- 输出目标 1：控制台 ----------
+console:
+  enabled: true
+  # 颜色高亮（Windows 需开启，Linux 自动支持）
+  colorize: true
+  # 实时输出，不缓冲（保证 Jenkins 构建日志即时可见）
+  flush: true
+
+# ---------- 输出目标 2：文件 ----------
+file:
+  enabled: true
+  # 日志文件路径（相对于项目根目录）
+  path: "reports/logs/api_test.log"
+  # 轮转策略
+  rotation: "20 MB"                 # 单个文件 20MB 后轮转
+  retention: "14 days"              # 保留 14 天
+  compression: "zip"                # 历史文件压缩为 zip
+  # 文件编码
+  encoding: "utf-8"
+  # 立即刷盘（防止崩溃丢日志）
+  enqueue: true
+  # 延迟打开文件（防止 pytest collect 阶段就建文件）
+  delay: true
+  # 是否输出到控制台（与 console 独立）
+  also_console: false
+
+# ---------- 输出目标 3：错误日志单独存档 ----------
+error_file:
+  enabled: true
+  path: "reports/logs/api_test_error.log"
+  level: "ERROR"                    # 只记录 ERROR 及以上
+  rotation: "10 MB"
+  retention: "30 days"              # 错误日志保留更久
+  compression: "zip"
+  encoding: "utf-8"
+  enqueue: true
+  delay: true
+
+# ---------- 输出目标 4：用例级日志缓冲 ----------
+# 将每个用例的日志独立缓存，结束后附加到 Allure
+case_buffer:
+  enabled: true
+  max_lines_per_case: 1000          # 单用例最大缓存行数（防大响应爆内存）
+  attach_to_allure: true            # 结束后自动附加到 Allure
+  attach_format: "text"             # 附件格式（text / json）
+
+# ---------- 日志噪音过滤 ----------
+# 屏蔽第三方库的过多 DEBUG 输出
+filters:
+  disable:
+    - "urllib3"
+    - "requests"
+    - "asyncio"
+    - "PIL"
+    - "faker"
+  # 特殊处理：保留警告与错误，屏蔽 DEBUG/INFO
+  levels:
+    urllib3: "WARNING"
+    requests: "WARNING"
+    faker: "WARNING"
+
+# ---------- 敏感信息脱敏 ----------
+masking:
+  enabled: true
+  fields:
+    - "password"
+    - "passwd"
+    - "token"
+    - "Cookie"
+    - "Authorization"
+    - "secret"
+    - "creditIdentifier"            # 企业信用代码
+  # 替换为固定字符
+  replace_with: "***MASKED***"
+
+# ---------- 日志异步与线程安全 ----------
+thread_safe:
+  enabled: true                     # 开启 enqueue 后自动线程安全
+  max_queue_size: 10000             # 并发时队列大小
+
+# ---------- 特殊场景 ----------
+special:
+  # 用例开始时打印分隔符
+  print_separator_on_case_start: true
+  separator_char: "="
+  separator_length: 80
+
+  # 用例失败时打印完整堆栈
+  print_traceback_on_error: true
+
+  # 请求/响应的日志截断长度（防止大报文爆日志）
+  truncate_request_body: 2000
+  truncate_response_body: 5000

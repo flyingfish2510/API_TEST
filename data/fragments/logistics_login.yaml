@@ -1,0 +1,23 @@
+# ============================================================
+# data/fragments/logistics_login.yaml
+# 物流系统登录公共片段
+# ============================================================
+
+- test:
+    name: "[前置] 物流系统登录"
+    request:
+      method: POST
+      url: "/api/user/login"
+      headers:
+        Content-Type: "application/json;charset=UTF-8"
+      json:
+        username: "{{env.accounts.logistics.username}}"
+        password: "{{env.accounts.logistics.password}}"
+    extract:
+      logistics_session:
+        source: cookie
+        name: "JSESSIONID"
+    validate:
+      - eq: ["status_code", 200]
+      - eq: ["$.code", 20000]
+      - eq: ["$.message", "操作成功"]

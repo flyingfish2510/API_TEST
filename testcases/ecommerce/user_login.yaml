@@ -1,0 +1,114 @@
+# ============================================================
+# testcases/ecommerce/user_login.yaml
+# 电商项目 - 用户登录接口
+#
+# 接口文档：
+#   POST /dar/user/login
+#   请求头：Content-Type: application/x-www-form-urlencoded;charset=UTF-8
+#   请求参数：
+#     user_name: String（必填）
+#     passwd: String（必填）
+#   返回数据：
+#     msg: String（登录成功提示信息）
+#     msg_code: Int（200 返回状态码）
+#     error_code: Int（None 返回错误码）
+#     token: Int（返回 token,用于后续接口校验）
+# ============================================================
+
+- config:
+    name: "电商-用户登录测试"
+    priority: "P0"
+    tags: ["smoke", "regression", "p0", "ecommerce", "user"]
+    description: "验证用户登录接口的正常与异常场景"
+
+# ============================================================
+# 场景 1：正常登录（正向）
+# ============================================================
+- test:
+    name: "用户登录-正确的账号密码"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:                                   # 表单提交
+        user_name: "{{env.accounts.admin.username}}"
+        passwd: "{{env.accounts.admin.password}}"
+    extract:
+      login_token: "$.token"                  # 提取 token 供其他用例或断言使用
+    validate:
+      - eq: ["status_code", 200]
+      - eq: ["$.msg_code", 200]
+      - contains: ["$.msg", "成功"]
+      - not_null: ["$.token"]
+      - schema: "login_response.json"
+
+# ============================================================
+# 场景 2：密码错误（异常）
+# ============================================================
+- test:
+    name: "用户登录-密码错误"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:
+        user_name: "{{env.accounts.admin.username}}"
+        passwd: "wrong_password_123"
+    validate:
+      - eq: ["status_code", 200]
+      # 密码错误时 msg_code 不应为 200（具体错误码视后端而定）
+      - not_eq: ["$.msg_code", 200]
+      - not_null: ["$.msg"]
+
+# ============================================================
+# 场景 3：账号不存在（异常）
+# ============================================================
+- test:
+    name: "用户登录-不存在的账号"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:
+        user_name: "not_exist_user_9999"
+        passwd: "any_password"
+    validate:
+      - eq: ["status_code", 200]
+      - not_eq: ["$.msg_code", 200]
+
+# ============================================================
+# 场景 4：缺少必填参数（异常）
+# ============================================================
+- test:
+    name: "用户登录-缺少 passwd 参数"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:
+        user_name: "{{env.accounts.admin.username}}"
+        # 缺少 passwd
+    validate:
+      - eq: ["status_code", 200]
+      - not_eq: ["$.msg_code", 200]
+
+# ============================================================
+# 场景 5：边界/空值测试
+# ============================================================
+- test:
+    name: "用户登录-账号密码为空字符串"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:
+        user_name: ""
+        passwd: ""
+    validate:
+      - eq: ["status_code", 200]
+      - not_eq: ["$.msg_code", 200]

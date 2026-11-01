@@ -1,0 +1,136 @@
+{
+  "name": "短信服务平台",
+  "description": "模拟阿里云短信服务的验证码、通知、限流及异常场景",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/send/code",
+        "body": {
+          "template": "LOGIN_CODE"
+        }
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.2,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "code": "OK",
+          "message": "短信发送成功",
+          "request_id": "{{$uuid}}",
+          "biz_id": "biz_{{$uuid}}",
+          "phone": "{{$body.phone}}",
+          "expire_in": 300,
+          "verify_code": "123456",
+          "timestamp": "{{$timestamp}}"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/send/order",
+        "body": {
+          "template": "ORDER_SUCCESS"
+        }
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.1,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "code": "OK",
+          "message": "订单通知已发送",
+          "request_id": "{{$uuid}}",
+          "phone": "{{$body.phone}}",
+          "order_no": "{{$body.order_no}}",
+          "timestamp": "{{$timestamp}}"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/verify"
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.05,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "code": "OK",
+          "message": "验证码校验成功",
+          "phone": "{{$body.phone}}",
+          "verified": true
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/rate_limit"
+      },
+      "response": {
+        "status": 429,
+        "delay": 0.05,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Retry-After": "60"
+        },
+        "body": {
+          "code": "RATE_LIMITED",
+          "message": "请求过于频繁，请稍后重试",
+          "request_id": "{{$uuid}}",
+          "cooldown": 60
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/gateway_error"
+      },
+      "response": {
+        "status": 502,
+        "body": {
+          "code": "GATEWAY_ERROR",
+          "message": "短信网关连接超时，请稍后重试"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/slow"
+      },
+      "response": {
+        "status": 200,
+        "delay": 8,
+        "body": {
+          "code": "OK",
+          "message": "响应延迟 8 秒，用于测试超时控制"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/sms/invalid_phone"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "code": "INVALID_PHONE",
+          "message": "手机号格式不正确"
+        }
+      }
+    }
+  ]
+}

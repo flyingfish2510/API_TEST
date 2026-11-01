@@ -1,0 +1,450 @@
+// ============================================================
+//  Jenkinsfile.daily
+//  用途：每日上午 6:00 定时全量回归 + 邮件通知
+//  特性：
+//    - 定时触发（每天 06:00）
+//    - 多环境参数化
+//    - Docker 化执行
+//    - 按模块并行执行
+//    - Allure + JUnit 双报告
+//    - 质量门禁阻断
+//    - 邮件通知（含 HTML 报告摘要 + 附件）
+// ============================================================
+
+pipeline {
+    agent none
+
+    // ---------- 参数 ----------
+    parameters {
+        choice(
+            name: 'ENV',
+            choices: ['test', 'uat', 'prod'],
+            description: '执行环境（prod 仅跑只读巡检用例）'
+        )
+        choice(
+            name: 'MODULE',
+            choices: ['all', 'ecommerce', 'logistics'],
+            description: '执行模块'
+        )
+        string(
+            name: 'WORKERS',
+            defaultValue: '4',
+            description: '并行进程数（pytest-xdist）'
+        )
+        string(
+            name: 'RETRY',
+            defaultValue: '1',
+            description: '失败重试次数（仅网络/5xx类）'
+        )
+        booleanParam(
+            name: 'SEND_EMAIL',
+            defaultValue: true,
+            description: '是否发送邮件通知'
+        )
+    }
+
+    // ---------- 环境变量 ----------
+    environment {
+        REPORT_DIR      = "reports/allure-results"
+        JUNIT_DIR       = "reports/junit"
+        ARTIFACT_DIR    = "reports/artifacts"
+        DOCKER_IMAGE    = "api-test-runner:latest"
+
+        // 邮件收件人（写死或做成参数）
+        MAIL_TO         = "18507113868@163.com"
+
+        // 敏感信息从 Jenkins Credentials 注入
+        DB_USER         = credentials('api-test-db-user')
+        DB_PASSWORD     = credentials('api-test-db-password')
+    }
+
+    // ---------- 选项 ----------
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    // ---------- 触发器：每天上午 6 点 ----------
+    triggers {
+        cron('H 6 * * *')   // 每天 06:00（带 H 散列，避免 Jenkins 高并发时刻）
+    }
+
+    stages {
+
+        // ============ Stage 1: 准备 ============
+        stage('Checkout & Prepare') {
+            agent any
+            steps {
+                checkout scm
+                sh 'echo "[INFO] Commit: $(git rev-parse --short HEAD)"'
+                sh 'echo "[INFO] Branch: $(git rev-parse --abbrev-ref HEAD)"'
+                sh 'mkdir -p reports reports/logs reports/junit reports/artifacts reports/allure-results'
+                // 恢复上一成功构建的 Allure history，保证趋势图跨构建累积
+                restoreAllureHistory()
+
+                script {
+                    def meta = """
+                    {
+                      "build_number": "${env.BUILD_NUMBER}",
+                      "commit": "${sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()}",
+                      "branch": "${sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()}",
+                      "env": "${params.ENV}",
+                      "module": "${params.MODULE}",
+                      "triggered_by": "${currentBuild.getBuildCauses()[0].shortDescription}",
+                      "start_time": "${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                    }
+                    """
+                    writeFile file: "${ARTIFACT_DIR}/build-metadata.json", text: meta
+                }
+            }
+        }
+
+        // ============ Stage 2: 构建镜像 ============
+        stage('Build Docker Image') {
+            agent any
+            steps {
+                sh """
+                    docker build \
+                        -f docker/Dockerfile \
+                        -t ${DOCKER_IMAGE} \
+                        .
+                """
+            }
+        }
+
+        // ============ Stage 3: 健康检查 ============
+        stage('Health Check') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/health_check.py \
+                        --env=${params.ENV} \
+                        --output=${ARTIFACT_DIR}/health-check.json
+                """
+            }
+        }
+
+        // ============ Stage 4: Dry Run ============
+        stage('Dry Run (YAML 预检)') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/dry_run.py \
+                        --env=${params.ENV} \
+                        --module=${params.MODULE}
+                """
+            }
+        }
+
+        // ============ Stage 5: 并行执行测试 ============
+        stage('Run Tests') {
+            parallel {
+
+                stage('Module: Ecommerce') {
+                    when {
+                        expression {
+                            params.MODULE == 'all' || params.MODULE == 'ecommerce'
+                        }
+                    }
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=ecommerce \
+                                --workers=${params.WORKERS} \
+                                --retry=${params.RETRY} \
+                                --report-dir=${REPORT_DIR}-ecommerce \
+                                --junit-dir=${JUNIT_DIR}
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts allowEmptyArchive: true,
+                                artifacts: "reports/logs/*.log",
+                                fingerprint: true
+                        }
+                    }
+                }
+
+                stage('Module: Logistics') {
+                    when {
+                        expression {
+                            params.MODULE == 'all' || params.MODULE == 'logistics'
+                        }
+                    }
+                    agent {
+                        docker {
+                            image "${DOCKER_IMAGE}"
+                            reuseNode true
+                            args '-u root --network=host'
+                        }
+                    }
+                    steps {
+                        sh """
+                            python run.py \
+                                --env=${params.ENV} \
+                                --module=logistics \
+                                --workers=${params.WORKERS} \
+                                --retry=${params.RETRY} \
+                                --report-dir=${REPORT_DIR}-logistics \
+                                --junit-dir=${JUNIT_DIR}
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts allowEmptyArchive: true,
+                                artifacts: "reports/logs/*.log",
+                                fingerprint: true
+                        }
+                    }
+                }
+            }
+        }
+
+        // ============ Stage 6: 合并与报告 ============
+        stage('Merge & Generate Reports') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    sh """
+                        mkdir -p ${REPORT_DIR}
+                        if [ -d "${REPORT_DIR}-ecommerce" ]; then
+                            cp -r ${REPORT_DIR}-ecommerce/* ${REPORT_DIR}/ || true
+                        fi
+                        if [ -d "${REPORT_DIR}-logistics" ]; then
+                            cp -r ${REPORT_DIR}-logistics/* ${REPORT_DIR}/ || true
+                        fi
+                    """
+                    sh """
+                        python scripts/quality_gate.py \
+                            --report-dir=${REPORT_DIR} \
+                            --output=${ARTIFACT_DIR}/quality-report.json
+                    """
+                }
+            }
+        }
+
+        // ============ Stage 7: 质量门禁 ============
+        stage('Quality Gate') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    def gateResult = sh(
+                        script: """
+                            python scripts/quality_gate.py \
+                                --check \
+                                --rules=ci/quality-gate-rules.json \
+                                --input=${ARTIFACT_DIR}/quality-report.json \
+                                --exit-code
+                        """,
+                        returnStatus: true
+                    )
+                    if (gateResult != 0) {
+                        unstable("质量门禁未通过，请查看 reports/artifacts/quality-report.json")
+                    }
+                }
+            }
+        }
+    }
+
+    // ============ 构建后处理 ============
+    post {
+        always {
+            // 1. JUnit 报告（Jenkins 原生）
+            junit allowEmptyResults: true, testResults: "${JUNIT_DIR}/*.xml"
+
+            // 2. Allure 报告
+            script {
+                if (fileExists(REPORT_DIR)) {
+                    allure([
+                        includeProperties: false,
+                        jdk: '',
+                        commandline: 'allure',
+                        properties: [],
+                        reportBuildPolicy: 'ALWAYS',
+                        results: [[path: REPORT_DIR]]
+                    ])
+                }
+            }
+
+            // 3. 归档产物
+            archiveArtifacts allowEmptyArchive: true,
+                artifacts: """
+                    reports/allure-results/**,
+                    reports/allure-report/**,
+                    reports/allure-report/history/**,
+                    reports/junit/**,
+                    reports/logs/**,
+                    reports/artifacts/**
+                """,
+                fingerprint: true
+
+            // 4. 清理分片临时目录
+            sh 'rm -rf reports/allure-results-ecommerce reports/allure-results-logistics || true'
+        }
+
+        // ---------- 邮件通知（无论成功/失败/不稳定都发） ----------
+        success {
+            emailext(
+                to: "${MAIL_TO}",
+                from: 'jenkins-noreply@yourcompany.com',
+                subject: "[SUCCESS] API_TEST 全量回归 | 环境: ${params.ENV} | 构建 #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body: buildEmailBody('SUCCESS'),
+                attachLog: false,
+                attachmentsPattern: 'reports/artifacts/quality-report.json'
+            )
+        }
+
+        unstable {
+            emailext(
+                to: "${MAIL_TO}",
+                from: 'jenkins-noreply@yourcompany.com',
+                subject: "[UNSTABLE] API_TEST 全量回归 | 环境: ${params.ENV} | 构建 #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body: buildEmailBody('UNSTABLE'),
+                attachLog: false,
+                attachmentsPattern: 'reports/artifacts/quality-report.json, reports/logs/*.log'
+            )
+        }
+
+        failure {
+            emailext(
+                to: "${MAIL_TO}",
+                from: 'jenkins-noreply@yourcompany.com',
+                subject: "[FAILURE] API_TEST 全量回归 | 环境: ${params.ENV} | 构建 #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body: buildEmailBody('FAILURE'),
+                attachLog: false,
+                attachmentsPattern: 'reports/artifacts/quality-report.json, reports/logs/*.log'
+            )
+        }
+    }
+}
+
+// ============================================================
+// 邮件 HTML 模板生成
+// ============================================================
+def buildEmailBody(String status) {
+    def color = status == 'SUCCESS' ? '#52c41a' :
+                status == 'UNSTABLE' ? '#faad14' : '#f5222d'
+
+    // 尝试读取质量报告摘要
+    def qualitySummary = ''
+    try {
+        if (fileExists("reports/artifacts/quality-report.json")) {
+            def report = readJSON file: 'reports/artifacts/quality-report.json'
+            qualitySummary = """
+                <tr><td>总用例数</td><td>${report.total ?: '-'}</td></tr>
+                <tr><td>通过</td><td style="color:#52c41a">${report.passed ?: '-'}</td></tr>
+                <tr><td>失败</td><td style="color:#f5222d">${report.failed ?: '-'}</td></tr>
+                <tr><td>通过率</td><td>${report.pass_rate ?: '-'}</td></tr>
+                <tr><td>P0 通过率</td><td>${report.p0_pass_rate ?: '-'}</td></tr>
+                <tr><td>耗时</td><td>${report.duration ?: '-'} s</td></tr>
+            """
+        }
+    } catch (Exception e) {
+        qualitySummary = "<tr><td colspan='2'>质量报告未生成</td></tr>"
+    }
+
+    def reportUrl   = "${env.BUILD_URL}allure"
+    def consoleUrl  = "${env.BUILD_URL}console"
+
+    return """
+    <div style="font-family: 'Microsoft YaHei', Arial, sans-serif; max-width: 720px;">
+      <h2 style="color: ${color};">API_TEST 每日全量回归 —— ${status}</h2>
+      <p>Jenkins 已自动完成每日定时回归测试，以下为本次执行摘要：</p>
+
+      <table border="1" cellspacing="0" cellpadding="8"
+             style="border-collapse: collapse; width: 100%; border-color: #ddd;">
+        <tr style="background:#f5f5f5;">
+          <td><b>项目</b></td><td><b>值</b></td>
+        </tr>
+        <tr><td>构建号</td><td>#${env.BUILD_NUMBER}</td></tr>
+        <tr><td>环境</td><td>${params.ENV}</td></tr>
+        <tr><td>模块</td><td>${params.MODULE}</td></tr>
+        <tr><td>触发方式</td><td>${currentBuild.getBuildCauses()[0].shortDescription}</td></tr>
+        <tr><td>构建耗时</td><td>${currentBuild.durationString}</td></tr>
+        ${qualitySummary}
+      </table>
+
+      <p style="margin-top: 20px;">
+        <a href="${reportUrl}"
+           style="display:inline-block;padding:10px 20px;background:${color};color:#fff;
+                  text-decoration:none;border-radius:4px;">
+          📊 查看 Allure 报告
+        </a>
+        <a href="${consoleUrl}"
+           style="display:inline-block;padding:10px 20px;margin-left:10px;
+                  background:#1890ff;color:#fff;text-decoration:none;border-radius:4px;">
+          🖥 查看构建日志
+        </a>
+      </p>
+
+      <p style="color:#999;font-size:12px;margin-top:30px;">
+        此邮件由 Jenkins 自动发送，请勿直接回复。<br/>
+        发件人：jenkins-noreply@yourcompany.com
+      </p>
+    </div>
+    """
+}
+
+// ============================================================
+// Allure 历史趋势：从上一成功构建恢复 history
+// ------------------------------------------------------------
+// Jenkins Allure 插件依据工作区 allure-report/history 叠加趋势。
+// 干净 agent / Docker 环境下工作区不持久，故每次构建前从上一
+// 成功构建的归档产物中恢复。
+// 注意：本函数被多个模块共用，合并分片后生成的报告会继承该 history。
+// ============================================================
+def restoreAllureHistory() {
+    try {
+        copyArtifacts(
+            projectName: env.JOB_NAME,
+            selector: lastSuccessful(),
+            filter: 'reports/allure-report/history/**',
+            target: 'reports/allure-results/history-tmp',
+            flatten: true,
+            optional: true
+        )
+        // 拷贝到插件读取历史的位置：allure-results/history
+        sh "mkdir -p reports/allure-results/history && cp -r reports/allure-results/history-tmp/* reports/allure-results/history/ || true"
+        echo "[INFO] 已恢复上一次成功构建的 Allure history（若存在）"
+    } catch (Exception e) {
+        echo "[WARN] 恢复 Allure history 失败（首次构建可忽略）: ${e.message}"
+    }
+}
+

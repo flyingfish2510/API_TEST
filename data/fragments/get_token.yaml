@@ -1,0 +1,32 @@
+# ============================================================
+# data/fragments/get_token.yaml
+# 通用 Token 获取 / 校验片段
+#
+# 适用场景：
+#   1. 当前环境已经预置了全局 token（如 AuthManager 注入）
+#   2. 需要将全局 token 取出来存为用例级变量
+#   3. 需要快速验证当前 token 的有效性（如请求 /api/user/info）
+#
+# 用法：
+#   - setup:
+#       - include: "get_token.yaml"
+#
+# 后续可直接使用：
+#   {{auth_token}} 或 {{login_token}}
+# ============================================================
+
+- test:
+    name: "[前置] 校验并获取全局 Token"
+    request:
+      method: GET
+      url: "/char/user/info"           # 通过一个轻量级只读接口验证 token
+      headers:
+        token: "{{token}}"             # 优先从全局注入的 token 拿
+    extract:
+      login_token: "$.data.token"      # 兼容某些接口会返回新的 session token
+      user_id: "$.data.id"
+    validate:
+      - eq: ["status_code", 200]
+      # 若 token 无效，后端通常会返回 401 或特定的 msg_code
+      - eq: ["$.msg_code", 200]
+      - not_null: ["$.data.id"]

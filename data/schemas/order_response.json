@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api-test.example.com/schemas/order_response.json",
+  "title": "电商订单接口响应契约",
+  "description": "适用于提交订单、支付订单、查询订单详情等电商订单类接口",
+
+  "type": "object",
+
+  "required": ["error_code", "message", "orderNumber", "userId"],
+
+  "properties": {
+    "createTime": {
+      "type": "string",
+      "description": "创建时间（格式：YYYY-MM-DD HH:MM:SS）",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
+    },
+
+    "error": {
+      "type": "string",
+      "description": "错误详情（成功时为空字符串）",
+      "maxLength": 200
+    },
+
+    "error_code": {
+      "type": "string",
+      "description": "业务错误码（0000 表示成功）",
+      "enum": ["0000", "1001", "1002", "2001", "2002"]
+    },
+
+    "message": {
+      "type": "string",
+      "description": "操作提示信息",
+      "minLength": 1,
+      "maxLength": 200
+    },
+
+    "orderNumber": {
+      "type": "string",
+      "description": "订单号（20 位纯数字）",
+      "pattern": "^\\d{20}$"
+    },
+
+    "userId": {
+      "type": "integer",
+      "description": "用户 ID（雪花算法长整型）",
+      "minimum": 1
+    },
+
+    "status": {
+      "type": "string",
+      "description": "订单状态",
+      "enum": ["PENDING", "PAID", "CANCELLED", "REFUNDED", "COMPLETED"]
+    },
+
+    "amount": {
+      "type": ["number", "string"],
+      "description": "订单金额（后端可能返回 string 或 number）",
+      "pattern": "^\\d+(\\.\\d{1,2})?$"
+    },
+
+    "translate_language": {
+      "type": "string",
+      "description": "多语言标识",
+      "enum": ["zh-CN", "en-US"]
+    },
+
+    "goodsList": {
+      "type": "array",
+      "description": "订单商品明细（部分查询接口返回）",
+      "items": { "$ref": "#/$defs/GoodsItem" }
+    }
+  },
+
+  "additionalProperties": false,
+
+  "$defs": {
+    "GoodsItem": {
+      "type": "object",
+      "required": ["goods_id", "price", "number"],
+      "properties": {
+        "goods_id": {
+          "type": "string",
+          "description": "商品ID"
+        },
+        "price": {
+          "type": ["number", "string"],
+          "description": "商品单价"
+        },
+        "number": {
+          "type": "integer",
+          "description": "购买数量",
+          "minimum": 1
+        },
+        "propertyChildIds": {
+          "type": "string",
+          "description": "商品规格组合（如 2:9）",
+          "pattern": "^\\d+:\\d+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "商品名称"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,199 @@
+# ============================================================
+# docker/docker-compose.yml
+# API_TEST 本地/CI 环境编排
+#
+# 使用方式：
+#   1. 启动全套环境：docker-compose up -d
+#   2. 查看日志：      docker-compose logs -f api-test
+#   3. 执行测试：      docker-compose run --rm api-test
+#   4. 停止环境：      docker-compose down -v
+# ============================================================
+
+version: "3.8"
+
+# ============================================================
+# 服务定义
+# ============================================================
+services:
+
+  # ------------------------------------------------------------
+  # 1. 被测服务（flaskServer）
+  # ------------------------------------------------------------
+  flask-server:
+    image: python:3.11-slim
+    container_name: api-test-flask-server
+    working_dir: /app
+    # 假设 flaskServer 源码在当前目录的 ../flaskServer
+    volumes:
+      - ../../flaskServer:/app:ro
+    command: >
+      sh -c "pip install --no-cache-dir flask flask-cors &&
+             python flask_server.py"
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Asia/Shanghai
+      FLASK_ENV: development
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - api-test-net
+
+  # ------------------------------------------------------------
+  # 2. MySQL 数据库
+  # ------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: api-test-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: ecommerce_test
+      MYSQL_USER: test_user
+      MYSQL_PASSWORD: test123
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 初始化 SQL（可选）
+      # - ../data/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - api-test-net
+
+  # ------------------------------------------------------------
+  # 3. Redis 缓存
+  # ------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: api-test-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - api-test-net
+
+  # ------------------------------------------------------------
+  # 4. Mock Server（独立进程，用于调试）
+  # ------------------------------------------------------------
+  mock-server:
+    build:
+      context: ..
+      dockerfile: docker/mock-server.Dockerfile
+    container_name: api-test-mock
+    ports:
+      - "8788:8788"    # 支付网关
+      - "8789:8789"    # 短信服务
+      - "8790:8790"    # SRM 物流
+    environment:
+      MOCK_RULES_DIR: /app/data/mocks
+      TZ: Asia/Shanghai
+    volumes:
+      - ../data/mocks:/app/data/mocks:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - api-test-net
+
+  # ------------------------------------------------------------
+  # 5. 测试执行器
+  # ------------------------------------------------------------
+  api-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: api-test-runner
+    depends_on:
+      flask-server:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # ---- 环境配置 ----
+      API_TEST_ENV: test
+      TZ: Asia/Shanghai
+
+      # ---- 数据库连接 ----
+      API_TEST_TEST_DATABASE_HOST: mysql
+      API_TEST_TEST_DATABASE_PORT: "3306"
+      API_TEST_TEST_DATABASE_USER: test_user
+      API_TEST_TEST_DATABASE_PASSWORD: test123
+      API_TEST_TEST_DATABASE_DB_NAME: ecommerce_test
+
+      # ---- Redis 连接 ----
+      API_TEST_TEST_REDIS_HOST: redis
+      API_TEST_TEST_REDIS_PORT: "6379"
+
+      # ---- 被测服务地址 ----
+      API_TEST_TEST_API_BASE_URL: "http://flask-server:8787"
+
+      # ---- 外部 Mock 服务 ----
+      PAYMENT_GATEWAY_URL: "http://mock-server:8788"
+      SMS_SERVICE_URL: "http://mock-server:8789"
+      SRM_SERVICE_URL: "http://mock-server:8790"
+
+      # ---- 执行参数 ----
+      WORKERS: "4"
+      RETRY: "2"
+
+    volumes:
+      # 挂载测试产物（宿主机可直接查看报告）
+      - ../reports:/app/reports
+      # 挂载测试用例（不重新构建镜像也能更新用例）
+      - ../testcases:/app/testcases
+      # 挂载数据资产
+      - ../data:/app/data
+    command: >
+      sh -c "
+        pytest testcases/ 
+          --env=test 
+          --workers=\$WORKERS 
+          --retry=\$RETRY 
+          --alluredir=reports/allure-results 
+          --junit-xml=reports/junit/junit.xml 
+          -v
+      "
+    networks:
+      - api-test-net
+
+# ============================================================
+# 网络
+# ============================================================
+networks:
+  api-test-net:
+    driver: bridge
+
+# ============================================================
+# 数据卷（持久化）
+# ============================================================
+volumes:
+  mysql-data:
+    driver: local
+  redis-data:
+    driver: local

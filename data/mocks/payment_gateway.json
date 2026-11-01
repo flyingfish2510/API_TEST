@@ -1,0 +1,146 @@
+{
+  "name": "微信支付网关",
+  "description": "模拟微信支付的下单、查询、回调及退款接口，覆盖正向与异常场景",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/unifiedorder"
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.1,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "return_code": "SUCCESS",
+          "return_msg": "OK",
+          "result_code": "SUCCESS",
+          "prepay_id": "wx{ {$uuid} }",
+          "trade_type": "JSAPI",
+          "timestamp": "{{$timestamp}}"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/query",
+        "body": {
+          "trade_state": "SUCCESS"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "return_code": "SUCCESS",
+          "result_code": "SUCCESS",
+          "trade_state": "SUCCESS",
+          "trade_state_desc": "支付成功",
+          "out_trade_no": "{{$body.out_trade_no}}",
+          "transaction_id": "wx{ {$uuid} }",
+          "total_fee": 19980,
+          "time_end": "{{$timestamp}}"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/query",
+        "body": {
+          "trade_state": "FAIL"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "return_code": "SUCCESS",
+          "result_code": "SUCCESS",
+          "trade_state": "PAYERROR",
+          "trade_state_desc": "支付失败",
+          "out_trade_no": "{{$body.out_trade_no}}",
+          "total_fee": 19980
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/callback"
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.2,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "return_code": "SUCCESS",
+          "return_msg": "OK",
+          "out_trade_no": "{{$body.out_trade_no}}",
+          "transaction_id": "wx{ {$uuid} }",
+          "attach": "{{$body.attach}}",
+          "pay_status": "PAID",
+          "pay_time": "{{$timestamp}}"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/refund"
+      },
+      "response": {
+        "status": 200,
+        "delay": 0.5,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "return_code": "SUCCESS",
+          "result_code": "SUCCESS",
+          "refund_id": "rf{ {$uuid} }",
+          "out_refund_no": "{{$body.out_refund_no}}",
+          "refund_fee": "{{$body.refund_fee}}",
+          "refund_status": "PROCESSING"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/slow"
+      },
+      "response": {
+        "status": 200,
+        "delay": 10,
+        "body": {
+          "return_code": "SUCCESS",
+          "message": "响应延迟 10 秒，用于测试超时控制"
+        }
+      }
+    },
+    {
+      "match": {
+        "method": "POST",
+        "path": "/pay/error"
+      },
+      "response": {
+        "status": 502,
+        "body": {
+          "return_code": "FAIL",
+          "return_msg": "网关连接超时，请稍后重试"
+        }
+      }
+    }
+  ]
+}

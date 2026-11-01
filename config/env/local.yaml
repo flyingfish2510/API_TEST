@@ -1,0 +1,99 @@
+# ============================================================
+# config/env/local.yaml
+# 本地调试环境配置
+#
+# 使用场景：开发者在自己电脑上启动 flaskServer.exe 后进行自测
+# 启动命令：python run.py --env=local
+# ============================================================
+
+# ---------- 环境元信息 ----------
+env_name: local
+description: "本地开发调试环境（默认连接 flaskServer）"
+
+# ---------- API 基础配置 ----------
+api:
+  base_url: "http://127.0.0.1:8787"      # flaskServer 默认启动地址
+  timeout: 10                            # 本地服务响应快，超时可设短
+  verify_ssl: false                      # 本地一般用 http，无需验证 SSL
+  retry_times: 0                         # 本地调试不重试，以便快速定位问题
+
+# ---------- 数据库配置 ----------
+# 说明：本地一般连测试库或本机 MySQL，也可以留空（不执行 DB 断言）
+database:
+  enabled: false                         # 本地调试默认不连库，避免依赖
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: "root"
+  db_name: "ecommerce_local"
+  charset: "utf8mb4"
+
+# ---------- Redis 配置 ----------
+redis:
+  enabled: false                         # 本地调试默认不用 Redis
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+
+# ---------- 账号体系 ----------
+# 本地 flaskServer 一般预置了默认测试账号
+accounts:
+  admin:
+    username: "test01"                   # 电商后台管理员（默认测试账号）
+    password: "admin123"
+
+  logistics:
+    username: "logistics_test"           # 物流系统账号
+    password: "admin123"
+
+  prod_readonly:
+    username: "readonly_user"            # 本地不会用到，占位
+    password: "readonly_pwd"
+
+# ---------- 认证接口配置 ----------
+auth:
+  ecommerce_login:
+    url: "/dar/user/login"                          # 电商登录路径
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    token_jsonpath: "$.token"                        # 从响应中提取 token 的 JSONPath
+    expire_seconds: 3600                             # Token 有效期（秒）
+
+  logistics_login:
+    url: "/api/user/login"                           # 物流登录路径
+    content_type: "application/json"
+    cookie_jsonpath: ""                              # 依赖 Set-Cookie，不需要 JSON 提取
+    expire_seconds: 1800
+
+# ---------- 执行策略 ----------
+execution:
+  workers: 1                             # 本地调试串行执行，日志更清晰
+  retry: 0
+  timeout_per_case: 30                   # 单用例超时（秒）
+  timeout_total: 600                     # 整体超时（秒）
+
+# ---------- 日志配置 ----------
+logging:
+  level: "DEBUG"                         # 本地打开 DEBUG，便于排查
+  format: "{time} | {level} | {extra[trace_id]} | {message}"
+  file: "reports/logs/local.log"
+  console: true                          # 本地运行时控制台输出日志
+
+# ---------- 安全开关 ----------
+safety:
+  is_production: false
+  allow_write_operations: true           # 本地允许写操作（下单、删除等）
+  forbidden_methods: []                  # 本地不拦截任何方法
+  forbidden_urls: []
+
+# ---------- Mock 服务 ----------
+mock:
+  enabled: true                          # 本地可启用 Mock（用于模拟第三方）
+  port: 8788                             # Mock 服务端口（避免与 flaskServer 冲突）
+  rules_dir: "data/mocks"
+
+# ---------- 快照对比 ----------
+snapshot:
+  enabled: false                         # 本地调试默认关闭快照，避免误判
+  snapshot_dir: "data/snapshots"
+  default_mode: "loose"
+  auto_save_on_first_run: false          # 本地不自动生成基线（避免提交脏数据）

@@ -1,0 +1,205 @@
+{
+  "$schema": "https://api-test.example.com/schemas/quality-gate-rules-v1.json",
+  "version": "1.0.0",
+  "description": "API_TEST 质量门禁统一规则",
+
+  "defaults": {
+    "retry_network_errors": true,
+    "max_report_size_mb": 100,
+    "ignore_skipped_cases": true,
+    "ignore_flaky_cases": false,
+    "flaky_threshold": 3
+  },
+
+  "modes": {
+    "mr": {
+      "description": "Merge Request 冒烟门禁 - 最严格,任何失败阻断合并",
+      "pass_rate_threshold": 100,
+      "p0_pass_rate_threshold": 100,
+      "p1_pass_rate_threshold": 100,
+      "p2_pass_rate_threshold": 0,
+      "max_new_failures": 0,
+      "max_duration_seconds": 300,
+      "allow_unstable": false,
+      "block_on_warn": true,
+      "rules": {
+        "p0": { "pass_rate": 100, "action": "block" },
+        "p1": { "pass_rate": 100, "action": "block" },
+        "p2": { "pass_rate": 0,   "action": "ignore" }
+      }
+    },
+
+    "daily": {
+      "description": "每日全量回归 - 允许警告但需关注",
+      "pass_rate_threshold": 95,
+      "p0_pass_rate_threshold": 100,
+      "p1_pass_rate_threshold": 95,
+      "p2_pass_rate_threshold": 80,
+      "max_new_failures": 5,
+      "max_duration_seconds": 1800,
+      "allow_unstable": true,
+      "block_on_warn": false,
+      "rules": {
+        "p0": { "pass_rate": 100, "action": "block" },
+        "p1": { "pass_rate": 95,  "action": "warn"  },
+        "p2": { "pass_rate": 80,  "action": "info"  }
+      }
+    },
+
+    "inspection": {
+      "description": "生产只读巡检 - 轻量,高频,失败告警但不阻断",
+      "pass_rate_threshold": 90,
+      "p0_pass_rate_threshold": 100,
+      "p1_pass_rate_threshold": 90,
+      "p2_pass_rate_threshold": 0,
+      "max_new_failures": 0,
+      "max_duration_seconds": 120,
+      "allow_unstable": true,
+      "block_on_warn": false,
+      "rules": {
+        "p0": { "pass_rate": 100, "action": "warn" },
+        "p1": { "pass_rate": 90,  "action": "warn" },
+        "p2": { "pass_rate": 0,   "action": "ignore" }
+      }
+    },
+
+    "release": {
+      "description": "发版前置门禁 - 极严格,P0必须全过,禁止新增失败",
+      "pass_rate_threshold": 98,
+      "p0_pass_rate_threshold": 100,
+      "p1_pass_rate_threshold": 100,
+      "p2_pass_rate_threshold": 80,
+      "max_new_failures": 0,
+      "max_duration_seconds": 2700,
+      "allow_unstable": false,
+      "block_on_warn": true,
+      "strict_mode": true,
+      "rules": {
+        "p0": { "pass_rate": 100, "action": "block" },
+        "p1": { "pass_rate": 100, "action": "block" },
+        "p2": { "pass_rate": 80,  "action": "warn"  }
+      }
+    }
+  },
+
+  "modules": {
+    "ecommerce": {
+      "display_name": "电子商务项目",
+      "min_case_count": {
+        "p0": 15,
+        "p1": 30,
+        "p2": 10
+      },
+      "allowed_skip_rate": 5,
+      "required_tags": ["smoke"],
+      "coverage_keywords": ["order", "pay", "goods", "user", "cart"]
+    },
+    "logistics": {
+      "display_name": "物流项目",
+      "min_case_count": {
+        "p0": 10,
+        "p1": 25,
+        "p2": 10
+      },
+      "allowed_skip_rate": 5,
+      "required_tags": ["smoke"],
+      "coverage_keywords": ["order", "dispatch", "carrier", "cost", "inventory"]
+    }
+  },
+
+  "duration_limits": {
+    "per_case_max_seconds": 60,
+    "per_module_max_seconds": 900,
+    "total_max_seconds": 2700,
+    "single_request_max_seconds": 30
+  },
+
+  "performance_baselines": {
+    "enabled": true,
+    "sample_size": 3,
+    "thresholds": {
+      "p50_ms": 500,
+      "p95_ms": 1500,
+      "p99_ms": 3000
+    },
+    "degradation_threshold_percent": 20
+  },
+
+  "flaky_detection": {
+    "enabled": true,
+    "window_builds": 10,
+    "retry_to_confirm": 2,
+    "threshold_pass_rate": 60,
+    "action": "warn"
+  },
+
+  "baseline_comparison": {
+    "enabled": true,
+    "baseline_source": "last_successful_release",
+    "compare_fields": ["total", "passed", "failed", "pass_rate"],
+    "new_failure_action": "block",
+    "fixed_case_action": "info"
+  },
+
+  "notifications": {
+    "on_success": {
+      "mr": false,
+      "daily": true,
+      "inspection": false,
+      "release": true
+    },
+    "on_unstable": {
+      "mr": true,
+      "daily": true,
+      "inspection": true,
+      "release": true
+    },
+    "on_failure": {
+      "mr": true,
+      "daily": true,
+      "inspection": true,
+      "release": true
+    }
+  },
+
+  "exit_codes": {
+    "success": 0,
+    "test_failed": 1,
+    "framework_error": 2,
+    "environment_unreachable": 3,
+    "safety_blocked": 4
+  },
+
+  "safety": {
+    "prod_readonly_only": true,
+    "forbidden_methods_in_prod": ["POST", "PUT", "DELETE", "PATCH"],
+    "forbidden_urls_in_prod": [
+      "/char/user/addUser",
+      "/char/user/deleteUser",
+      "/char/user/updateUser",
+      "/coupApply/cms/placeAnOrder",
+      "/coupApply/cms/orderPay",
+      "/coupApply/cms/shoppingJoinCart",
+      "/coupApply/cms/delCart",
+      "/api/order/customer/orderPlan/create",
+      "/api/order/pc/order/master/receive",
+      "/api/order/pc/order/assign",
+      "/api/order/pc/order/trans/receive",
+      "/api/order/pc/logisticsOrder/handSplitOrder",
+      "/api/order/pc/logisticsOrder/handCapacityDispatch",
+      "/api/order/app/schedule/confirm",
+      "/rpc/srm/inventory",
+      "/order/feign/dbjlxt",
+      "/api/order/pc/cost/receiveCost/create/bill",
+      "/api/user/pc/carrier/carrier/add",
+      "/api/user/pc/carrier/carrier/delete"
+    ]
+  },
+
+  "metadata": {
+    "author": "QA Team",
+    "created_at": "2026-01-01",
+    "last_updated": "2026-01-05",
+    "maintainer": "18507113868@163.com"
+  }
+}

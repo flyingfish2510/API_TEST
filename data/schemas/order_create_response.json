@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api-test.example.com/schemas/order_create_response.json",
+  "title": "物流-统一下单接口响应契约（电商侧下单）",
+  "description": "物流-统一下单接口响应契约（电商侧下单）",
+  "type": "object",
+  "properties": {
+    "msg": {
+      "type": "string",
+      "description": "业务提示信息",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "msg_code": {
+      "type": "integer",
+      "description": "业务状态码（200 表示成功）"
+    },
+    "error_code": {
+      "type": [
+        "integer",
+        "string",
+        "null"
+      ],
+      "description": "错误码"
+    },
+    "error": {
+      "type": [
+        "integer",
+        "string",
+        "null"
+      ],
+      "description": "部分电商接口使用的错误码字段（200 表示成功）"
+    },
+    "translate_language": {
+      "type": "string",
+      "description": "多语言标识",
+      "enum": [
+        "zh-CN",
+        "en-US"
+      ]
+    },
+    "server_time": {
+      "type": [
+        "string",
+        "integer",
+        "null"
+      ],
+      "description": "服务器时间"
+    },
+    "orderNumber": {
+      "type": "string",
+      "description": "订单号",
+      "pattern": "^\\d{20,22}$"
+    },
+    "userId": {
+      "type": [
+        "integer",
+        "string"
+      ],
+      "description": "用户 ID"
+    }
+  },
+  "additionalProperties": true,
+  "required": [
+    "error_code"
+  ]
+}

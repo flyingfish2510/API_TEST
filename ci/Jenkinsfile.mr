@@ -1,0 +1,428 @@
+// ============================================================
+//  Jenkinsfile.mr
+//  用途：Merge Request 冒烟门禁
+//  特性：
+//    - MR 创建/更新时自动触发
+//    - 极速执行（目标 < 5 分钟）
+//    - 基于 Git diff 的增量执行（只跑受影响模块）
+//    - 失败直接阻断合并（FAILURE，不降级）
+//    - 结果回写到 MR（GitLab/GitHub）
+//    - 邮件仅失败通知
+// ============================================================
+
+pipeline {
+    agent none
+
+    // ---------- 参数 ----------
+    parameters {
+        choice(
+            name: 'ENV',
+            choices: ['test', 'uat'],
+            description: '执行环境（禁止 prod）'
+        )
+        choice(
+            name: 'SCOPE',
+            choices: ['smoke', 'incremental', 'full'],
+            description: '执行范围：smoke=冒烟；incremental=增量；full=全量'
+        )
+        string(
+            name: 'WORKERS',
+            defaultValue: '2',
+            description: '并行进程数（MR门禁建议 2，避免占用过多资源）'
+        )
+    }
+
+    // ---------- 环境变量 ----------
+    environment {
+        REPORT_DIR      = "reports/allure-results-mr"
+        JUNIT_DIR       = "reports/junit"
+        ARTIFACT_DIR    = "reports/artifacts"
+        LOG_DIR         = "reports/logs"
+        DOCKER_IMAGE    = "api-test-runner:latest"
+
+        MAIL_TO         = "18507113868@163.com"
+        MAIL_FROM       = "jenkins-noreply@yourcompany.com"
+
+        // 禁止在生产环境运行 MR 门禁
+        ALLOW_ENV_PROD  = "false"
+    }
+
+    // ---------- 选项 ----------
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        timeout(time: 10, unit: 'MINUTES')       // MR 门禁严格 10 分钟超时
+        skipDefaultCheckout(false)
+    }
+
+    // ---------- 触发器 ----------
+    triggers {
+        // MR 的 Webhook 会直接触发本流水线，无需 cron
+        // 如需手动批量触发，可临时打开下面这行
+        // cron('H/30 * * * *')
+    }
+
+    stages {
+
+        // ============ Stage 1: 准备 + 拉取 MR 变更 ============
+        stage('Checkout & Diff') {
+            agent any
+            steps {
+                checkout scm
+
+                script {
+                    // 根据不同的 SCM 类型，提取变更文件列表
+                    def changedFiles = []
+                    try {
+                        def targetBranch = env.CHANGE_TARGET ?: 'main'
+                        // GitLab/GitHub MR 上下文
+                        if (env.CHANGE_ID) {
+                            sh """
+                                git fetch origin ${targetBranch} || true
+                                git diff --name-only origin/${targetBranch}...HEAD > changed_files.txt || true
+                            """
+                        } else {
+                            sh """
+                                git diff --name-only HEAD~1 HEAD > changed_files.txt || true
+                            """
+                        }
+                        changedFiles = readFile('changed_files.txt')
+                                        .trim()
+                                        .split('\n')
+                                        .findAll { it }
+                    } catch (Exception e) {
+                        echo "[WARN] 获取变更文件失败: ${e.message}，将回退为全量执行"
+                        changedFiles = []
+                    }
+
+                    // 记录到构建元数据
+                    def meta = """
+                    {
+                      "build_number": "${env.BUILD_NUMBER}",
+                      "change_id": "${env.CHANGE_ID ?: 'N/A'}",
+                      "change_target": "${env.CHANGE_TARGET ?: 'N/A'}",
+                      "change_branch": "${env.CHANGE_BRANCH ?: 'N/A'}",
+                      "env": "${params.ENV}",
+                      "scope": "${params.SCOPE}",
+                      "changed_files": ${groovy.json.JsonOutput.toJson(changedFiles)},
+                      "triggered_by": "${currentBuild.getBuildCauses()[0].shortDescription}",
+                      "start_time": "${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                    }
+                    """
+                    writeFile file: "${ARTIFACT_DIR}/mr-metadata.json", text: meta
+
+                    // 供后续 stage 使用的增量提示文件
+                    writeFile file: 'changed_files.txt', text: changedFiles.join('\n')
+                }
+
+                // 安全校验：MR 不允许跑 prod
+                script {
+                    if (params.ENV == 'prod' && env.ALLOW_ENV_PROD != "true") {
+                        error("❌ MR 门禁不允许在生产环境执行")
+                    }
+                }
+
+                sh 'mkdir -p reports reports/logs reports/junit reports/artifacts ' + REPORT_DIR
+                // 恢复上一成功构建的 Allure history，保证趋势图跨构建累积
+                restoreAllureHistory()
+            }
+        }
+
+        // ============ Stage 2: 构建镜像 ============
+        stage('Build Docker Image') {
+            agent any
+            steps {
+                // MR 场景优先复用已有镜像，减少构建耗时
+                script {
+                    def imageExists = sh(
+                        script: "docker images -q ${DOCKER_IMAGE}",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!imageExists) {
+                        sh """
+                            docker build \
+                                -f docker/Dockerfile \
+                                -t ${DOCKER_IMAGE} \
+                                .
+                        """
+                    } else {
+                        echo "[INFO] 已存在镜像 ${DOCKER_IMAGE}，跳过构建以节省时间"
+                    }
+                }
+            }
+        }
+
+        // ============ Stage 3: 健康检查（快速失败）============
+        stage('Health Check') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/health_check.py \
+                        --env=${params.ENV} \
+                        --output=${ARTIFACT_DIR}/health-check.json
+                """
+            }
+        }
+
+        // ============ Stage 4: Dry Run（YAML 语法预检）============
+        stage('Dry Run') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                sh """
+                    python scripts/dry_run.py \
+                        --env=${params.ENV} \
+                        --module=all
+                """
+            }
+        }
+
+        // ============ Stage 5: 计算执行范围 ============
+        stage('Compute Scope') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    // 根据用户选择的 SCOPE 与变更文件，决定运行参数
+                    def runArgs = ""
+                    if (params.SCOPE == 'smoke') {
+                        runArgs = "--tag=smoke"
+                    } else if (params.SCOPE == 'incremental') {
+                        // 增量：由框架根据 changed_files.txt 计算
+                        sh """
+                            python scripts/incremental_plan.py \
+                                --changed-files=changed_files.txt \
+                                --output=${ARTIFACT_DIR}/incremental-plan.json
+                        """
+                        def plan = readJSON file: "${ARTIFACT_DIR}/incremental-plan.json"
+                        if (plan && plan.files && plan.files.size() > 0) {
+                            runArgs = "--case-files=" + plan.files.join(",")
+                        } else {
+                            // 无法匹配依赖，退化为 smoke
+                            echo "[INFO] 未匹配到增量文件，退化为 smoke 范围"
+                            runArgs = "--tag=smoke"
+                        }
+                    } else {
+                        runArgs = "--tag=smoke"   // full 也先跑 smoke，防耗时
+                    }
+
+                    // 写入临时文件供下一 stage 使用
+                    writeFile file: '.run_args', text: runArgs
+                    echo "[INFO] 本次执行参数: ${runArgs}"
+                }
+            }
+        }
+
+        // ============ Stage 6: 执行冒烟/增量测试 ============
+        stage('Run MR Tests') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    def runArgs = readFile('.run_args').trim()
+                    sh """
+                        python run.py \
+                            --env=${params.ENV} \
+                            --module=all \
+                            --workers=${params.WORKERS} \
+                            --retry=0 \
+                            --timeout-per-case=30 \
+                            --timeout-total=300 \
+                            --report-dir=${REPORT_DIR} \
+                            --junit-dir=${JUNIT_DIR} \
+                            ${runArgs}
+                    """
+                }
+            }
+            post {
+                always {
+                    sh "ls -la ${REPORT_DIR} || true"
+                }
+            }
+        }
+
+        // ============ Stage 7: 结果汇总（门禁判定）============
+        stage('Result Gate') {
+            agent {
+                docker {
+                    image "${DOCKER_IMAGE}"
+                    reuseNode true
+                    args '-u root --network=host'
+                }
+            }
+            steps {
+                script {
+                    sh """
+                        python scripts/quality_gate.py \
+                            --report-dir=${REPORT_DIR} \
+                            --output=${ARTIFACT_DIR}/mr-report.json \
+                            --mode=mr
+                    """
+
+                    def report = readJSON file: "${ARTIFACT_DIR}/mr-report.json"
+
+                    // MR 门禁：任何失败即 FAILURE（不降级）
+                    if ((report.failed ?: 0) > 0) {
+                        error("❌ MR 门禁未通过：${report.failed} 个用例失败")
+                    }
+
+                    // 通过率阈值（MR 场景可放宽到 98%）
+                    def passRate = report.pass_rate_value ?: 100
+                    if (passRate < 98) {
+                        error("❌ MR 门禁未通过：通过率 ${report.pass_rate} 低于 98%")
+                    }
+
+                    echo "[OK] MR 门禁通过：${report.passed}/${report.total} 全部通过"
+                }
+            }
+        }
+    }
+
+    // ============ 构建后处理 ============
+    post {
+        always {
+            // 1. JUnit
+            junit allowEmptyResults: true, testResults: "${JUNIT_DIR}/*.xml"
+
+            // 2. Allure（MR 场景生成轻量报告即可）
+            script {
+                if (fileExists(REPORT_DIR)) {
+                    allure([
+                        includeProperties: false,
+                        jdk: '',
+                        commandline: 'allure',
+                        properties: [],
+                        reportBuildPolicy: 'ALWAYS',
+                        results: [[path: REPORT_DIR]]
+                    ])
+                }
+            }
+
+            // 3. 归档
+            archiveArtifacts allowEmptyArchive: true,
+                artifacts: """
+                    ${ARTIFACT_DIR}/mr-metadata.json,
+                    ${ARTIFACT_DIR}/mr-report.json,
+                    ${ARTIFACT_DIR}/health-check.json,
+                    ${LOG_DIR}/mr-*.log,
+                    reports/allure-report/history/**
+                """,
+                fingerprint: false
+
+            // 4. 回写 GitLab MR 状态（若安装了 GitLab Plugin）
+            script {
+                if (env.CHANGE_ID && env.gitlabMergeRequestIid) {
+                    try {
+                        gitlabCommitStatus(name: "API_TEST_MR_GATE",
+                            state: currentBuild.currentResult == "SUCCESS" ? "success" : "failed")
+                    } catch (Exception e) {
+                        echo "[WARN] GitLab MR 状态回写失败：${e.message}"
+                    }
+                }
+            }
+        }
+
+        // 失败才发邮件（MR 场景高频，成功不发）
+        failure {
+            script {
+                def report = [:]
+                try {
+                    if (fileExists("${ARTIFACT_DIR}/mr-report.json")) {
+                        report = readJSON file: "${ARTIFACT_DIR}/mr-report.json"
+                    }
+                } catch (Exception e) { }
+
+                def failedCases = ''
+                if (report.failed_cases && report.failed_cases.size() > 0) {
+                    failedCases = "<ul>"
+                    report.failed_cases.take(5).each { c ->
+                        failedCases += "<li><b>${c.name}</b>: ${c.message ?: '未知错误'}</li>"
+                    }
+                    failedCases += "</ul>"
+                }
+
+                emailext(
+                    to: "${MAIL_TO}",
+                    from: "${MAIL_FROM}",
+                    subject: "[MR FAILED] 门禁未通过 | MR !${env.CHANGE_ID ?: 'N/A'} | 构建 #${env.BUILD_NUMBER}",
+                    mimeType: 'text/html',
+                    body: """
+                    <div style="font-family:'Microsoft YaHei', Arial; max-width:720px;">
+                      <h2 style="color:#f5222d;">❌ Merge Request 门禁未通过</h2>
+                      <table border="1" cellspacing="0" cellpadding="8"
+                             style="border-collapse:collapse;width:100%;border-color:#ddd;">
+                        <tr style="background:#f5f5f5;"><td><b>项目</b></td><td><b>值</b></td></tr>
+                        <tr><td>MR 编号</td><td>!${env.CHANGE_ID ?: 'N/A'}</td></tr>
+                        <tr><td>目标分支</td><td>${env.CHANGE_TARGET ?: 'N/A'}</td></tr>
+                        <tr><td>构建号</td><td>#${env.BUILD_NUMBER}</td></tr>
+                        <tr><td>环境</td><td>${params.ENV}</td></tr>
+                        <tr><td>执行范围</td><td>${params.SCOPE}</td></tr>
+                        <tr><td>总用例</td><td>${report.total ?: '-'}</td></tr>
+                        <tr><td>通过</td><td style="color:#52c41a">${report.passed ?: '-'}</td></tr>
+                        <tr><td>失败</td><td style="color:#f5222d">${report.failed ?: '-'}</td></tr>
+                        <tr><td>通过率</td><td>${report.pass_rate ?: '-'}</td></tr>
+                      </table>
+                      ${failedCases ? "<h3>失败用例（Top5）</h3>" + failedCases : ''}
+                      <p style="margin-top:20px;">
+                        <a href="${env.BUILD_URL}allure"
+                           style="padding:10px 20px;background:#1890ff;color:#fff;
+                                  text-decoration:none;border-radius:4px;">
+                          📊 查看 Allure 报告
+                        </a>
+                      </p>
+                    </div>
+                    """
+                )
+            }
+        }
+    }
+}
+
+// ============================================================
+// Allure 历史趋势：从上一成功构建恢复 history
+// ------------------------------------------------------------
+// 说明：
+//   Jenkins Allure 插件依据工作区的 allure-report/history 叠加趋势。
+//   在干净 agent / Docker 环境下工作区不持久，故每次构建前需从
+//   上一次成功构建的归档产物中恢复该目录。
+// ============================================================
+def restoreAllureHistory() {
+    try {
+        copyArtifacts(
+            projectName: env.JOB_NAME,
+            selector: lastSuccessful(),
+            filter: 'reports/allure-report/history/**',
+            target: 'reports/allure-results-mr/history-tmp',
+            flatten: true,
+            optional: true
+        )
+        // 拷贝到插件读取历史的位置：allure-results/history
+        sh "mkdir -p reports/allure-results-mr/history && cp -r reports/allure-results-mr/history-tmp/* reports/allure-results-mr/history/ || true"
+        echo "[INFO] 已恢复上一次成功构建的 Allure history（若存在）"
+    } catch (Exception e) {
+        echo "[WARN] 恢复 Allure history 失败（首次构建可忽略）: ${e.message}"
+    }
+}
+

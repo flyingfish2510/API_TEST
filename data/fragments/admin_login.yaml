@@ -1,0 +1,22 @@
+# ============================================================
+# data/fragments/admin_login.yaml
+# 电商管理员登录公共片段
+# ============================================================
+
+- test:
+    name: "[前置] 管理员登录"
+    request:
+      method: POST
+      url: "/dar/user/login"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded;charset=UTF-8"
+      data:
+        user_name: "{{env.accounts.admin.username}}"
+        passwd: "{{env.accounts.admin.password}}"
+    extract:
+      login_token: "$.token"
+    validate:
+      - eq: ["status_code", 200]
+      - eq: ["$.msg_code", 200]
+      - contains: ["$.msg", "成功"]
+      - not_null: ["$.token"]

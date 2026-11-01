@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+reports/allure-results/*
+reports/allure-report/*
+reports/logs/*
+reports/junit/*
+reports/**/.gitkeep
+data/snapshots/*
+data/snapshots/.gitkeep
+.pytest_cache/
+# 本地工具目录（allure 命令行等，可重装）
+.tools/
+.npm-cache/
+reports/allure-history-cache/

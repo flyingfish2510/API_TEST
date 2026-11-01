@@ -1,0 +1,114 @@
+# ============================================================
+# .dockerignore —— API_TEST 框架 Docker 构建排除规则
+# 与根目录的 .dockerignore 对应（Dockerfile 位于 docker/ 目录）
+# ============================================================
+
+# ---------- 版本控制 ----------
+.git
+.gitignore
+.gitattributes
+.github
+.gitlab-ci.yml
+
+# ---------- 环境与凭证（绝对不能进镜像） ----------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+credentials/
+config/env/*.local.yaml
+
+# ---------- Python 缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ---------- 测试执行产物（运行时生成，不应进镜像） ----------
+reports/allure-results/*
+reports/allure-report/*
+reports/junit/*
+reports/logs/*
+reports/artifacts/*
+# 仅保留 .gitkeep 以便目录结构存在
+!reports/**/.gitkeep
+
+# ---------- 测试资产（由 CI 挂载，不打进镜像） ----------
+# 说明：testcases/ 与 data/ 在运行时由 Jenkins 挂载或 COPY
+# 如果希望镜像包含这些，请注释掉下面几行
+# testcases/
+# data/
+
+# ---------- IDE 与编辑器 ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------- 临时文件与缓存 ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.log
+*.tmp
+*.bak
+tmp/
+temp/
+
+# ---------- Docker 相关（避免递归包含） ----------
+Dockerfile
+Dockerfile.*
+docker-compose*.yml
+.dockerignore
+
+# ---------- CI/CD 文件 ----------
+ci/
+Jenkinsfile*
+*.jenkinsfile
+
+# ---------- 文档（可选，镜像中不需要） ----------
+docs/
+README.md
+*.md
+LICENSE
+CHANGELOG.md
+
+# ---------- 其他 ----------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+node_modules/

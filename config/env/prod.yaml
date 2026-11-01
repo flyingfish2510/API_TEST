@@ -1,0 +1,166 @@
+# ============================================================
+# config/env/prod.yaml
+# 生产环境配置（最高安全级别）
+#
+# 使用场景：生产环境健康巡检（只读）
+# 执行命令：python run.py --env=prod --tag=health --readonly
+# 安全原则：
+#   1. 绝对禁止任何写操作（POST/PUT/DELETE）
+#   2. 只允许只读查询（GET 或只读类 POST）
+#   3. 账号权限必须具备只读限制
+# ============================================================
+
+# ---------- 环境元信息 ----------
+env_name: prod
+description: "生产环境（只读巡检，严禁写操作）"
+
+# ---------- API 基础配置 ----------
+api:
+  # 生产地址，部署时替换为实际域名
+  base_url: "https://api.yourcompany.com"
+  timeout: 10
+  verify_ssl: true                       # 生产必须校验 SSL 证书
+  retry_times: 1                         # 巡检遇到网络抖动可重试1次
+  read_only: true                        # 全局只读标志（EnvGuard 读取）
+
+# ---------- 数据库配置 ----------
+# 说明：生产巡检一般不直接连库（避免误操作、减轻主库压力）
+database:
+  enabled: false
+  host: "prod-db-internal.yourcompany.com"
+  port: 3306
+  user: ""                               # 生产巡检账号默认不配置（避免误连）
+  password: ""
+  db_name: "ecommerce_prod"
+  charset: "utf8mb4"
+
+# ---------- Redis 配置 ----------
+redis:
+  enabled: false
+  host: "prod-redis-internal.yourcompany.com"
+  port: 6379
+  db: 0
+
+# ---------- 账号体系 ----------
+# 生产巡检必须使用专用只读账号，绝不能使用超级管理员
+accounts:
+  prod_readonly:
+    # 生产只读巡检账号（权限由运维申请，仅能查询）
+    # 优先从 Jenkins Credentials 读取环境变量注入：
+    #   API_TEST_PROD_PROD_READONLY_USER
+    #   API_TEST_PROD_PROD_READONLY_PASSWORD
+    username: "__FROM_CREDENTIALS__"
+    password: "__FROM_CREDENTIALS__"
+
+  # 生产环境不配置 admin、logistics 等写权限账号
+  # 即使配置也必须指向只读账号
+
+# ---------- 认证接口配置 ----------
+auth:
+  ecommerce_login:
+    # 生产登录接口（如果巡检需要鉴权）
+    # 若生产巡检接口允许匿名，可不登录
+    url: "/dar/user/login"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    token_jsonpath: "$.token"
+    expire_seconds: 7200
+    readonly_account: true               # 强制使用只读账号登录
+
+  logistics_login:
+    url: "/api/user/login"
+    content_type: "application/json"
+    cookie_jsonpath: ""
+    expire_seconds: 3600
+    readonly_account: true
+
+# ---------- 执行策略 ----------
+execution:
+  workers: 1                             # 生产巡检串行，减轻业务压力
+  retry: 0                               # 不重试，避免掩盖真实故障
+  timeout_per_case: 15                   # 巡检单用例严格限时
+  timeout_total: 120                     # 整体不超过 2 分钟
+  stop_on_first_failure: true            # 首次失败即停，避免重复冲击生产
+
+# ---------- 日志配置 ----------
+logging:
+  level: "INFO"
+  format: "{time} | {level} | {extra[trace_id]} | {message}"
+  file: "reports/logs/prod_inspection.log"
+  console: true
+
+# ---------- 安全开关（核心！） ----------
+safety:
+  is_production: true                    # 明确标记生产环境
+  allow_write_operations: false          # 🚫 绝对禁止写操作
+  readonly_whitelist:                    # 白名单：仅允许这些只读操作
+    methods:
+      - GET
+    urls:
+      - "/coupApply/cms/goodsList"       # 商品列表查询
+      - "/coupApply/cms/productDetail"   # 商品详情查询
+      - "/coupApply/cms/checkOrderStatus"     # 校验订单状态
+      - "/coupApply/cms/checkLogisticsStatus" # 校验物流状态
+      - "/coupApply/cms/shoppingInventory"    # 校验库存
+      - "/api/order/pc/cost/payCost/page"     # 对账单分页查询
+      - "/api/user/pc/carrier/cys/findPage"   # 承运商列表查询
+      - "/dar/user/login"                # 只读登录（鉴权用）
+      - "/api/user/login"                # 物流只读登录
+    allowed_readonly_post:
+      # 文档中部分查询接口用 POST，但语义是只读的（如按条件查询）
+      - "/coupApply/cms/goodsList"       # 商品列表（POST）
+      - "/coupApply/cms/productDetail"   # 商品详情（POST）
+      - "/coupApply/cms/checkOrderStatus"     # 订单状态查询（POST）
+      - "/coupApply/cms/checkLogisticsStatus" # 物流状态查询（POST）
+      - "/coupApply/cms/shoppingInventory"    # 库存查询（POST）
+      - "/api/order/pc/cost/payCost/page"     # 对账单查询（POST）
+      - "/api/user/pc/carrier/cys/findPage"   # 承运商查询（POST）
+      - "/dar/user/login"
+      - "/api/user/login"
+
+  forbidden_methods:                     # 明确禁止的方法
+    - PUT
+    - DELETE
+    - PATCH
+
+  forbidden_urls:                        # 明确禁止的 URL（高危险）
+    - "/char/user/addUser"               # 新增用户
+    - "/char/user/deleteUser"            # 删除用户
+    - "/char/user/updateUser"            # 修改用户
+    - "/coupApply/cms/placeAnOrder"      # 提交订单
+    - "/coupApply/cms/orderPay"          # 订单支付
+    - "/coupApply/cms/shoppingJoinCart"  # 添加购物车
+    - "/coupApply/cms/delCart"           # 删除购物车
+    - "/api/order/customer/orderPlan/create" # 货主下订单
+    - "/api/order/pc/order/master/receive"   # 集团接单
+    - "/api/order/pc/order/assign"       # 分配订单
+    - "/api/order/pc/order/trans/receive"    # 物流公司接单
+    - "/api/order/pc/logisticsOrder/handSplitOrder"    # 拆分订单
+    - "/api/order/pc/logisticsOrder/handCapacityDispatch" # 调度派车
+    - "/api/order/app/schedule/confirm"  # 司机确认运输
+    - "/rpc/srm/inventory"               # SRM 推送库存
+    - "/order/feign/dbjlxt"              # 计量系统推送
+    - "/api/order/pc/cost/receiveCost/create/bill"     # 创建对账单
+    - "/api/user/pc/carrier/carrier/add" # 添加承运商
+    - "/api/user/pc/carrier/carrier/delete" # 删除承运商
+
+# ---------- Mock 服务 ----------
+mock:
+  enabled: false                         # 生产巡检不启用任何 Mock
+
+# ---------- 快照对比 ----------
+snapshot:
+  enabled: false                         # 生产环境不做快照对比（避免基线维护成本）
+
+# ---------- 告警配置 ----------
+alert:
+  enabled: true
+  on_failure: true                       # 巡检失败立即告警
+  on_success: false                      # 成功静默
+  channels:
+    email:
+      enabled: true
+      to: "18507113868@163.com"
+      subject_prefix: "[PROD-ALERT]"
+    dingtalk:
+      enabled: false                     # 可按需开启
+      webhook: "__FROM_CREDENTIALS__"
