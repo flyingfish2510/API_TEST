@@ -204,15 +204,40 @@ def context_sandbox():
 
 @pytest.fixture
 def data_factory(api_client):
-    """测试数据工厂（构造测试数据）"""
-    from core.factories.data_factory import DataFactory
+    """
+    测试数据工厂（构造测试数据 + 自动回收）
 
-    factory = DataFactory(api_client)
+    说明：
+        框架的造数能力由 TrashBin（数据回收站）+ YAML 的 variables: 提供。
+        此 fixture 以 TrashBin 为基础，提供统一的「登记造数 → 用例结束清理」入口，
+        供 Python 编写的高级用例使用；YAML 用例无需依赖本 fixture。
+
+    用法：
+        def test_xxx(data_factory):
+            uid = create_user()              # 自行造数
+            data_factory.register("user", uid)  # 登记，用例结束后自动清理
+    """
+    class _DataFactory:
+        def __init__(self, client):
+            self.client = client
+
+        def register(self, resource_type, resource_id, context=None):
+            """登记造数资源，用例结束后由 TrashBin 统一回收"""
+            TrashBin.register(resource_type, resource_id, context or {})
+
+        def cleanup(self):
+            """立即清理本工厂登记的资源（可选，Session 结束也会统一清理）"""
+            TrashBin.cleanup_all(write_report=False)
+
+    factory = _DataFactory(api_client)
 
     yield factory
 
-    # 清理本用例创建的数据
-    factory.cleanup()
+    # 用例结束：触发一次清理（已清理过的资源不会重复处理）
+    try:
+        TrashBin.cleanup_all(write_report=False)
+    except Exception as e:
+        logger.warning(f"[Fixture] data_factory 清理异常: {e}")
 
 
 @pytest.fixture
